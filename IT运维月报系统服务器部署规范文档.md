@@ -31,11 +31,16 @@
 # ==========================================
 FROM node:18-alpine AS builder
 WORKDIR /app
+
+# 核心突破：Tailwind CSS v4 底层采用 Rust (oxide) 编写，Alpine 容器中必须安装 libc6-compat 兼容库
+# 否则在运行 Vite 编译时会由于缺少 glibc 动态链接库而抛出 "Cannot find native binding" 错误！
+RUN apk add --no-cache libc6-compat
+
 COPY package*.json ./
 
-# 提示：使用具有极高兼容性的 npm install 替换严格的 npm ci
+# 提示：删除可能携带宿主机特定平台信息的锁文件，使用具有高兼容性的 npm install
 # 另外加入国内专线镜像源，极大提升在大陆服务器上的打包速度
-RUN npm install --registry=https://registry.npmmirror.com --no-audit --no-fund
+RUN rm -f package-lock.json && npm install --registry=https://registry.npmmirror.com --no-audit --no-fund
 
 COPY . .
 # 执行前端 Vite 编译和后端 Server esbuild 打包
@@ -47,9 +52,12 @@ RUN npm run build
 FROM node:18-alpine
 WORKDIR /app
 
+# 为生产阶段同样注入 64位 C 运行时兼容层，确保运行时若有原生二进制能顺利运行
+RUN apk add --no-cache libc6-compat
+
 # 仅复制生产依赖和编译输出
 COPY package*.json ./
-RUN npm install --only=production --registry=https://registry.npmmirror.com --no-audit --no-fund
+RUN rm -f package-lock.json && npm install --only=production --registry=https://registry.npmmirror.com --no-audit --no-fund
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public
@@ -84,6 +92,25 @@ npm error The `npm ci` command can only install with an existing package-lock.js
 * **方案 A（最推荐，简单可靠）**：直接使用我们上方推荐的最新 Dockerfile，将 `RUN npm ci` 更改为 **`RUN npm install --registry=https://registry.npmmirror.com --no-audit --no-fund`**。这不仅解决了缺少 lockfile 的问题，还能利用阿里云淘宝源进行高达 10 倍的极速安装，规避了由于 npmjs.org 官方源在内网超时导致构建卡住的难题。
 * **方案 B（检查构建上下文）**：检查构建目录下是否存在 `package-lock.json`。如果存在，请确认当前目录下没有 `.dockerignore` 意外排除了该文件，或在打包命令中显式加入该文件。
 * **方案 C（全新生成）**：若锁文件损坏，可在本地重新运行 `npm install`，提交最新生成的 `package-lock.json` 至 Git 仓库中。
+
+### 3. 常见问题排查：Vite 构建时抛出 `Cannot find native binding` 报错的终极解决方法
+
+如果运维在执行 `RUN npm run build` 阶段时出现如下报错：
+```text
+failed to load config from /app/vite.config.ts
+error during build:
+Error: Cannot find native binding. npm has a bug related to optional dependencies...
+    at Object.<anonymous> (/app/node_modules/@tailwindcss/oxide/index.js:573:11)
+```
+
+**原因分析：**
+1. **Alpine 缺失 C 运行时依赖**：本系统升级到了先进的 **Tailwind CSS v4** 编译引擎。为了在编译时提供极速响应，Vite 和 Tailwind 依赖由 Rust 编写的原生二进制编译器模块（即 `@tailwindcss/oxide`）。在基于 Alpine Linux 的精简容器（如 `node:18-alpine`）中，默认缺少 `glibc` 动态运行库（Alpine 默认采用精简的 `musl` 库）。如果直接调用这些 native 文件，就会抛出找不到原生绑定的错误。
+2. **跨平台 Lockfile 锁死冲突**：在 Windows 或 macOS 开发机上生成的 `package-lock.json` 被复制到 Docker Linux Alpine 容器中时，其锁定的可选依赖（`optionalDependencies`）指向了原本的开发平台架构。而 `npm` 存在由于跨平台缓存没有在 Alpine 中下载对应平台的二进制原生依赖文件的已知 Bug。
+
+**完美的解决方法：**
+* **双重保障（最省心，本方案已完美集成在上方最新 Dockerfile 中）**：
+  1. **安装兼容层**：在 Docker 阶段一的开头加上 **`RUN apk add --no-cache libc6-compat`**，为容器注入 Linux 64位 C/C++ 动态链接库兼容能力（可兼容多数 native binary 模块）。
+  2. **解除跨平台依赖死锁**：在构建时先运行 **`rm -f package-lock.json`** 将本地携带开发平台缓存的锁文件清理掉，然后再执行全新 `npm install --registry=https://registry.npmmirror.com`。这样能让 npm 在 Alpine 容器内自适应拉取专门适配 Alpine Linux 的原生 `@tailwindcss/oxide` 等原生依赖包，彻底解决该报错！
 
 ---
 
