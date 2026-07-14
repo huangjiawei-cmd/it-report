@@ -69,6 +69,7 @@ CMD ["npm", "start"]
 为了避免本地开发机上的 `node_modules` 或 `dist` 被 `COPY . .` 指令复制并覆盖掉容器内通过 `npm install` 干净安装的 Linux 依赖包，**必须在项目根目录下创建 `.dockerignore` 文件**：
 
 ```text
+# 核心注意：.dockerignore 规则会通过 HTTP Header 传输到 BuildKit，规则中绝对不能含有中文等非 ASCII 字符！
 node_modules/
 dist/
 .git/
@@ -76,8 +77,7 @@ dist/
 .env
 .env.*
 *.log
-README.md
-IT运维月报系统服务器部署规范文档.md
+*.md
 ```
 
 ---

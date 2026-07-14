@@ -5,5 +5,4 @@ dist/
 .env
 .env.*
 *.log
-README.md
-IT运维月报系统服务器部署规范文档.md
+*.md
