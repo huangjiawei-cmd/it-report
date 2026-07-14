@@ -1,12 +1,8 @@
 # IT 运维月报系统服务器部署规范文档
 
-本部署规范文档针对 **IT 运维月报系统**的上服务器生产化、容器化部署提供标准指导。运维人员必须严格按照此标准进行环境初始化、持久卷挂载、反向代理与安全加固配置。
+本部署规范文档针对 **IT 运维月报系统**的服务器生产化、容器化部署提供标准指导。运维人员必须严格按照规范进行部署与配置。
 
----
-
-## 一、 部署架构与基本运行环境
-
-本系统采用高效的 **Node.js (Express) + React (Vite) + ESM 前后端一体化全栈容器架构**。
+## 一、 运行环境与网络规划
 
 ### 1. 运行平台要求
 * **容器化环境**: Docker 20.10.0+ 或 Kubernetes (k8s) 1.22+
@@ -23,18 +19,14 @@
 推荐采用 Docker 容器化方案进行一键交付，实现运行环境的强隔离。
 
 ### 1. 标准 `Dockerfile` 推荐
-运维部门可直接使用如下的多阶段构建 `Dockerfile`。针对部分服务器因 `.dockerignore` 过滤或传输不全导致缺少 `package-lock.json` 而引发的 `npm ci` 报错（EUSAGE 错误），本配置默认采用兼容性更强、且支持中国内网镜像源加速的 `npm install` 指令：
+运维部门可直接使用如下的多阶段构建 `Dockerfile`。针对部分服务器因缺少 `.dockerignore` 导致本地 `node_modules` 意外覆盖容器、或是 Alpine 的 musl 库缺失引发 `@tailwindcss/oxide` 等 Rust 原生编译器模块抛出 `Cannot find native binding` 错误，**本系统强烈推荐采用 `node:18-slim`（基于 Debian，自带标准 glibc）作为基础镜像**，并配合极速国内镜像源：
 
 ```dockerfile
 # ==========================================
 # 阶段一：依赖安装与前端静态资源编译
 # ==========================================
-FROM node:18-alpine AS builder
+FROM node:18-slim AS builder
 WORKDIR /app
-
-# 核心突破：Tailwind CSS v4 底层采用 Rust (oxide) 编写，Alpine 容器中必须安装 libc6-compat 兼容库
-# 否则在运行 Vite 编译时会由于缺少 glibc 动态链接库而抛出 "Cannot find native binding" 错误！
-RUN apk add --no-cache libc6-compat
 
 COPY package*.json ./
 
@@ -49,11 +41,8 @@ RUN npm run build
 # ==========================================
 # 阶段二：生产运行环境
 # ==========================================
-FROM node:18-alpine
+FROM node:18-slim
 WORKDIR /app
-
-# 为生产阶段同样注入 64位 C 运行时兼容层，确保运行时若有原生二进制能顺利运行
-RUN apk add --no-cache libc6-compat
 
 # 仅复制生产依赖和编译输出
 COPY package*.json ./
@@ -76,41 +65,47 @@ ENV STORAGE_FILE_PATH=/app/data/report_storage.json
 CMD ["npm", "start"]
 ```
 
-### 2. 常见问题排查：`npm ci` 失败（EUSAGE 报错）的根本原因与解决方法
+### 2. 标准 `.dockerignore` 推荐
+为了避免本地开发机上的 `node_modules` 或 `dist` 被 `COPY . .` 指令复制并覆盖掉容器内通过 `npm install` 干净安装的 Linux 依赖包，**必须在项目根目录下创建 `.dockerignore` 文件**：
 
-如果运维在执行原本的 `npm ci` 时出现如下报错：
+```text
+node_modules/
+dist/
+.git/
+.gitignore
+.env
+.env.*
+*.log
+README.md
+IT运维月报系统服务器部署规范文档.md
+```
+
+---
+
+### 3. 常见问题排查与核心原因分析
+
+#### 问题 A：`npm ci` 报错（EUSAGE）
 ```text
 npm error code EUSAGE
 npm error The `npm ci` command can only install with an existing package-lock.json...
 ```
+* **根本原因**：在 CI/CD 流程中，由于没有同步推送 `package-lock.json`（或通过 Zip 打包忽略了它），导致 Docker 构建上下文内只有 `package.json`，而 `npm ci` 强依赖于锁文件才能工作。
+* **解决办法**：用 `rm -f package-lock.json && npm install` 替换 `npm ci`，并采用国内阿里云 `npmmirror` 镜像源加速。
 
-**原因分析：**
-1. **未同步提交 `package-lock.json`**：在部分 DevOps 环境中，由于设置了 `.dockerignore` 或是在 Git 传输、Zip 压缩包传输中漏掉了 `package-lock.json`，导致 Docker 构建上下文（Build Context）中只有 `package.json`。
-2. **版本兼容性问题**：如果宿主机与 Docker 内 Alpine 镜像（Node 18）所携带的 `npm` 版本跨度较大，可能导致 `package-lock.json` 内部的 `lockfileVersion` 声明无法被识别。
-
-**三种完美解决手段：**
-* **方案 A（最推荐，简单可靠）**：直接使用我们上方推荐的最新 Dockerfile，将 `RUN npm ci` 更改为 **`RUN npm install --registry=https://registry.npmmirror.com --no-audit --no-fund`**。这不仅解决了缺少 lockfile 的问题，还能利用阿里云淘宝源进行高达 10 倍的极速安装，规避了由于 npmjs.org 官方源在内网超时导致构建卡住的难题。
-* **方案 B（检查构建上下文）**：检查构建目录下是否存在 `package-lock.json`。如果存在，请确认当前目录下没有 `.dockerignore` 意外排除了该文件，或在打包命令中显式加入该文件。
-* **方案 C（全新生成）**：若锁文件损坏，可在本地重新运行 `npm install`，提交最新生成的 `package-lock.json` 至 Git 仓库中。
-
-### 3. 常见问题排查：Vite 构建时抛出 `Cannot find native binding` 报错的终极解决方法
-
-如果运维在执行 `RUN npm run build` 阶段时出现如下报错：
+#### 问题 B：Vite 构建时抛出 `Cannot find native binding` 错误
 ```text
 failed to load config from /app/vite.config.ts
 error during build:
 Error: Cannot find native binding. npm has a bug related to optional dependencies...
     at Object.<anonymous> (/app/node_modules/@tailwindcss/oxide/index.js:573:11)
 ```
-
-**原因分析：**
-1. **Alpine 缺失 C 运行时依赖**：本系统升级到了先进的 **Tailwind CSS v4** 编译引擎。为了在编译时提供极速响应，Vite 和 Tailwind 依赖由 Rust 编写的原生二进制编译器模块（即 `@tailwindcss/oxide`）。在基于 Alpine Linux 的精简容器（如 `node:18-alpine`）中，默认缺少 `glibc` 动态运行库（Alpine 默认采用精简的 `musl` 库）。如果直接调用这些 native 文件，就会抛出找不到原生绑定的错误。
-2. **跨平台 Lockfile 锁死冲突**：在 Windows 或 macOS 开发机上生成的 `package-lock.json` 被复制到 Docker Linux Alpine 容器中时，其锁定的可选依赖（`optionalDependencies`）指向了原本的开发平台架构。而 `npm` 存在由于跨平台缓存没有在 Alpine 中下载对应平台的二进制原生依赖文件的已知 Bug。
-
-**完美的解决方法：**
-* **双重保障（最省心，本方案已完美集成在上方最新 Dockerfile 中）**：
-  1. **安装兼容层**：在 Docker 阶段一的开头加上 **`RUN apk add --no-cache libc6-compat`**，为容器注入 Linux 64位 C/C++ 动态链接库兼容能力（可兼容多数 native binary 模块）。
-  2. **解除跨平台依赖死锁**：在构建时先运行 **`rm -f package-lock.json`** 将本地携带开发平台缓存的锁文件清理掉，然后再执行全新 `npm install --registry=https://registry.npmmirror.com`。这样能让 npm 在 Alpine 容器内自适应拉取专门适配 Alpine Linux 的原生 `@tailwindcss/oxide` 等原生依赖包，彻底解决该报错！
+* **根本原因 1：宿主机文件污染（最常见）**
+  如果项目没有配置 `.dockerignore`，当执行 `COPY . .` 时，宿主机上已有的 `node_modules`（可能是 Windows、macOS 平台编译的二进制文件）会直接**覆盖**掉容器内部在 `RUN npm install` 阶段安装好的 Linux 版本依赖。导致在运行 `npm run build` 时，Vite 加载了不兼容平台的 native 二进制文件，引发报错。
+* **根本原因 2：Alpine 的 musl 与 glibc 不兼容**
+  本系统升级到了全新的 **Tailwind CSS v4** 编译引擎。为了实现超高性能的编译速度，它底层采用了由 Rust 编写的编译器模块 `@tailwindcss/oxide`。基于 Alpine 镜像的 Alpine Linux 采用的是精简版 `musl libc`，而大多数 Rust 编写的 npm native 包默认是针对 `glibc` 进行动态链接的。因此即使在 Alpine 内补充了 `libc6-compat`，由于 Alpine 的 npm 版本和可选依赖解析漏洞，仍可能无法正确拉取或运行 musl 版本的 native package。
+* **终极解决方法**：
+  1. **配置 `.dockerignore`**：务必在根目录写入 `.dockerignore`，彻底隔绝宿主机 `node_modules` 对容器环境的污染。
+  2. **更换为 `node:18-slim` 基础镜像**：弃用容易因 musl 链接库报错的 Alpine 镜像，统一更换为更加稳定、自带完整 `glibc` 依赖环境的 **`node:18-slim`**（Debian-based）基础镜像。这样可以让 `@tailwindcss/oxide` 及其他 native-binding 依赖稳定执行，完全消除任何平台不兼容问题。
 
 ---
 
