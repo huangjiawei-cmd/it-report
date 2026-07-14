@@ -1,8 +1,11 @@
-node_modules/
-dist/
-.git/
+# Keep this file ASCII-only. Some Docker/BuildKit versions reject
+# non-printable characters in ignore patterns while transferring context.
+node_modules
+dist
+.git
 .gitignore
 .env
 .env.*
 *.log
-*.md
+npm-debug.log*
+.DS_Store
