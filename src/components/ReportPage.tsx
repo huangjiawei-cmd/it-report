@@ -389,8 +389,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         const imgData = await toJpeg(element, {
-          quality: 0.7, // Balances high readability with lightweight compression to keep total file size to ~5-6M
-          pixelRatio: 1.5, // 1.5x resolution is crisp for display and 44% more lightweight than 2x
+          quality: 0.95, // High fidelity quality to eliminate compression artifacts and blurriness
+          pixelRatio: 2.5, // 2.5x resolution ensures crisp text and vector charts
           backgroundColor: "#ffffff"
         });
 
