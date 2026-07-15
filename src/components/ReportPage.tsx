@@ -141,6 +141,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
   const [customLogos, setCustomLogos] = useState<Record<string, string>>({});
 
   useEffect(() => {
+    // 1. 先尝试快速从 localStorage 加载，保证秒开体验
     try {
       const saved = localStorage.getItem("custom_brand_logos");
       if (saved) {
@@ -149,6 +150,23 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     } catch (e) {
       console.error("Failed to parse custom brand logos in ReportPage:", e);
     }
+
+    // 2. 异步从后端同步最新的全局自定义品牌 Logo，保持团队各成员浏览器显示一致
+    const fetchServerLogos = async () => {
+      try {
+        const res = await fetch("/api/custom-logos");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.customLogos) {
+            setCustomLogos(data.customLogos);
+            localStorage.setItem("custom_brand_logos", JSON.stringify(data.customLogos));
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch custom logos from server in ReportPage:", err);
+      }
+    };
+    fetchServerLogos();
   }, []);
 
   // Navigation mode state - default to false (全览模式 / Scroll mode) per user preference

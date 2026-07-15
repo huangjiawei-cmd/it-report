@@ -230,8 +230,8 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ limit: "10mb", extended: true }));
   app.use(express.static(path.join(process.cwd(), "public")));
 
 
@@ -255,6 +255,9 @@ async function startServer() {
             if (!parsed.month_configs || typeof parsed.month_configs !== "object") {
               parsed.month_configs = {};
             }
+            if (!parsed.custom_logos || typeof parsed.custom_logos !== "object") {
+              parsed.custom_logos = {};
+            }
             return parsed;
           }
         }
@@ -262,7 +265,7 @@ async function startServer() {
     } catch (e) {
       console.error("加载本地存储失败:", e);
     }
-    return { qiyu_cache: {}, month_configs: {} };
+    return { qiyu_cache: {}, month_configs: {}, custom_logos: {} };
   }
 
   function saveStorage(data: any) {
@@ -586,6 +589,54 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // 获取自定义品牌 Logo
+  app.get("/api/custom-logos", (req, res) => {
+    try {
+      const storage = loadStorage();
+      return res.json({ customLogos: storage.custom_logos || {} });
+    } catch (e: any) {
+      console.error("加载自定义Logo失败:", e);
+      return res.status(500).json({ error: "加载自定义Logo失败" });
+    }
+  });
+
+  // 更新或删除单个品牌 Logo
+  app.post("/api/custom-logos", (req, res) => {
+    try {
+      const { brandId, base64 } = req.body;
+      if (!brandId) {
+        return res.status(400).json({ error: "缺少品牌ID (brandId)" });
+      }
+      const storage = loadStorage();
+      if (!storage.custom_logos) {
+        storage.custom_logos = {};
+      }
+      if (base64) {
+        storage.custom_logos[brandId] = base64;
+      } else {
+        delete storage.custom_logos[brandId];
+      }
+      saveStorage(storage);
+      return res.json({ success: true, customLogos: storage.custom_logos });
+    } catch (e: any) {
+      console.error("保存自定义Logo失败:", e);
+      return res.status(500).json({ error: "保存自定义Logo失败" });
+    }
+  });
+
+  // 重置所有品牌 Logo
+  app.post("/api/custom-logos/reset-all", (req, res) => {
+    try {
+      const storage = loadStorage();
+      storage.custom_logos = {};
+      saveStorage(storage);
+      return res.json({ success: true, customLogos: {} });
+    } catch (e: any) {
+      console.error("重置自定义Logo失败:", e);
+      return res.status(500).json({ error: "重置自定义Logo失败" });
+    }
+  });
+
   // 系统健康状态与持久化挂载诊断接口
   app.get("/api/admin/system-health", (req, res) => {
     try {
@@ -745,13 +796,16 @@ echo "=================================================="
     return res.send(shContent);
   });
 
-  // 获取服务器公网出口IP接口，方便加白
-  app.get("/api/server-ip", async (req, res) => {
-    return res.json({ ip: "34.96.48.95" });
-  });
-
-  // 获取真实公网出口 IP，诊断是否发生了漂移
-  app.get("/api/real-outbound-ip", async (req, res) => {
+  let cachedPublicIp: string | null = null;
+  async function getPublicIP(): Promise<string> {
+    if (cachedPublicIp) {
+      return cachedPublicIp;
+    }
+    // 优先从环境变量获取，方便运维直接通过 Docker 环境变量配置公网出口 IP
+    if (process.env.SERVER_IP) {
+      cachedPublicIp = process.env.SERVER_IP;
+      return cachedPublicIp;
+    }
     try {
       const controller = new AbortController();
       const id = setTimeout(() => controller.abort(), 2000); // 2秒超时
@@ -760,13 +814,27 @@ echo "=================================================="
       if (response.ok) {
         const data = await response.json() as { ip: string };
         if (data && data.ip) {
-          return res.json({ ip: data.ip });
+          cachedPublicIp = data.ip;
+          return data.ip;
         }
       }
     } catch (err: any) {
       console.log("动态获取服务器公网IP失败:", err.message);
     }
-    return res.json({ ip: "34.96.48.155" }); // 使用最近检测到的物理出口作为自愈兜底
+    // 如果获取失败，使用最近检测到的物理出口作为自愈兜底
+    return "34.96.48.95";
+  }
+
+  // 获取服务器公网出口IP接口，方便加白
+  app.get("/api/server-ip", async (req, res) => {
+    const ip = await getPublicIP();
+    return res.json({ ip });
+  });
+
+  // 获取真实公网出口 IP，诊断是否发生了漂移
+  app.get("/api/real-outbound-ip", async (req, res) => {
+    const ip = await getPublicIP();
+    return res.json({ ip });
   });
 
   // 测试千康数据库连通状态接口

@@ -384,6 +384,25 @@ export default function App() {
     }
   });
 
+  // 从后端同步最新的全局自定义品牌 Logo，确保多用户打开看到完全一致的界面
+  useEffect(() => {
+    const fetchServerLogos = async () => {
+      try {
+        const res = await fetch("/api/custom-logos");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.customLogos) {
+            setCustomLogos(data.customLogos);
+            localStorage.setItem("custom_brand_logos", JSON.stringify(data.customLogos));
+          }
+        }
+      } catch (err) {
+        console.error("同步后端自定义Logo失败:", err);
+      }
+    };
+    fetchServerLogos();
+  }, []);
+
   const [isCustomizerUnlocked, setIsCustomizerUnlocked] = useState<boolean>(false);
   const [hoverProgress, setHoverProgress] = useState<number>(0);
   const hoverTimerRef = useRef<any>(null);
@@ -430,26 +449,60 @@ export default function App() {
     };
   }, []);
 
-  const updateCustomLogo = (brandId: string, base64Data: string) => {
+  const updateCustomLogo = async (brandId: string, base64Data: string) => {
+    // 1. 立即更新前端状态 & 本地缓存
     setCustomLogos(prev => {
       const updated = { ...prev, [brandId]: base64Data };
       localStorage.setItem("custom_brand_logos", JSON.stringify(updated));
       return updated;
     });
+
+    // 2. 异步推送到后端存储以进行全局共享
+    try {
+      await fetch("/api/custom-logos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brandId, base64: base64Data })
+      });
+    } catch (err) {
+      console.error("同步保存自定义Logo至后端失败:", err);
+    }
   };
 
-  const resetCustomLogo = (brandId: string) => {
+  const resetCustomLogo = async (brandId: string) => {
+    // 1. 立即更新前端状态 & 本地缓存
     setCustomLogos(prev => {
       const updated = { ...prev };
       delete updated[brandId];
       localStorage.setItem("custom_brand_logos", JSON.stringify(updated));
       return updated;
     });
+
+    // 2. 异步同步到后端删除
+    try {
+      await fetch("/api/custom-logos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brandId, base64: "" })
+      });
+    } catch (err) {
+      console.error("同步删除自定义Logo至后端失败:", err);
+    }
   };
 
-  const resetAllLogos = () => {
+  const resetAllLogos = async () => {
+    // 1. 立即更新前端状态 & 本地缓存
     setCustomLogos({});
     localStorage.removeItem("custom_brand_logos");
+
+    // 2. 异步同步到后端重置
+    try {
+      await fetch("/api/custom-logos/reset-all", {
+        method: "POST"
+      });
+    } catch (err) {
+      console.error("同步重置全部Logo至后端失败:", err);
+    }
   };
 
   const getInitialDraft = <T,>(key: string, defaultValue: T): T => {
