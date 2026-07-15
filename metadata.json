@@ -1,0 +1,6 @@
+{
+  "name": "九毛九集团-IT运维月报系统",
+  "description": "九毛九集团IT运维月度报告PPT级高规集成系统，打通阿里云工单数据库并融合七鱼客服、BOH手工填报，提供一键自动化清洗、高清图表可视化及专业PDF打印支持。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
