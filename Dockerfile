@@ -4,15 +4,12 @@
 FROM node:18-slim AS builder
 WORKDIR /app
 
-# 复制依赖声明文件
+# 复制依赖声明文件与锁文件
 COPY package*.json ./
 
 # 核心解决手段：
-# 1. 删除携带开发机平台缓存的 lockfile，防止 npm 锁定错误的架构依赖
-# 2. 清理 npm 缓存并从高兼容的阿里云源进行全新安装，确保拉取正确的 Linux 原生 native 二进制包
-RUN rm -f package-lock.json \
-    && npm cache clean --force \
-    && npm install --registry=https://registry.npmmirror.com --no-audit --no-fund
+# 使用 npm ci 严格按照 package-lock.json 安装依赖，确保完全一致的依赖树
+RUN npm ci --registry=https://registry.npmmirror.com --no-audit --no-fund
 
 # 复制所有项目源文件
 COPY . .
@@ -26,10 +23,11 @@ RUN npm run build
 FROM node:18-slim
 WORKDIR /app
 
-# 仅复制生产依赖描述并拉取生产依赖
+# 复制依赖声明文件与锁文件
 COPY package*.json ./
-RUN rm -f package-lock.json \
-    && npm install --only=production --registry=https://registry.npmmirror.com --no-audit --no-fund
+
+# 仅拉取生产依赖，严格遵循 package-lock.json
+RUN npm ci --omit=dev --registry=https://registry.npmmirror.com --no-audit --no-fund
 
 # 从阶段一复制编译后的静态资源和后端可执行服务
 COPY --from=builder /app/dist ./dist
