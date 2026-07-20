@@ -1155,23 +1155,54 @@ echo "=================================================="
       cachedPublicIp = process.env.SERVER_IP;
       return cachedPublicIp;
     }
-    try {
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 2000); // 2秒超时
-      const response = await fetch("https://api.ipify.org?format=json", { signal: controller.signal });
-      clearTimeout(id);
-      if (response.ok) {
-        const data = await response.json() as { ip: string };
-        if (data && data.ip) {
-          cachedPublicIp = data.ip;
-          return data.ip;
+
+    const services = [
+      {
+        url: "https://api.ipify.org?format=json",
+        parse: async (res: Response) => {
+          const data = await res.json() as { ip: string };
+          return data?.ip;
+        }
+      },
+      {
+        url: "http://ip.3322.net",
+        parse: async (res: Response) => {
+          const text = await res.text();
+          return text?.trim();
+        }
+      },
+      {
+        url: "http://ipinfo.io/ip",
+        parse: async (res: Response) => {
+          const text = await res.text();
+          return text?.trim();
         }
       }
-    } catch (err: any) {
-      console.log("动态获取服务器公网IP失败:", err.message);
+    ];
+
+    for (const service of services) {
+      try {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), 1500); // 1.5秒超时
+        const response = await fetch(service.url, { signal: controller.signal });
+        clearTimeout(id);
+        if (response.ok) {
+          const ip = await service.parse(response);
+          // 简单验证 IP 格式 (IPv4)
+          if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
+            cachedPublicIp = ip;
+            console.log(`[IP] 成功通过 ${service.url} 获取公网出口 IP: ${ip}`);
+            return ip;
+          }
+        }
+      } catch (err: any) {
+        console.log(`[IP] 通过 ${service.url} 获取 IP 失败:`, err.message);
+      }
     }
-    // 如果获取失败，使用最近检测到的物理出口作为自愈兜底
-    return "34.96.48.95";
+
+    // 如果全部接口获取失败，说明服务器可能处于隔离环境/无外网访问权限，不再硬编码 Google Cloud IP 避免误导
+    console.warn("[IP] 动态获取公网出口 IP 全部失败 (网络超时或受限)。");
+    return "获取失败 (网络超时)";
   }
 
   // 获取服务器公网出口IP接口，方便加白
