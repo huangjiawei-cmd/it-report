@@ -6,6 +6,7 @@ import mysql from "mysql2/promise";
 import * as xlsx from "xlsx";
 import { createServer as createViteServer } from "vite";
 import os from "os";
+import crypto from "crypto";
 
 async function getDingTalkStoreMetrics(monthStr: string) {
   const credentialsStr = "3xI3rs5SKj-_T-B_GBVSkwB--q9TkUeguuuTEykqMrLl-8Iys8ZwTZqUezw9LrEf";
@@ -241,6 +242,200 @@ async function startServer() {
 
   // 本地持久化缓存文件路径，优先使用环境变量便于容器挂载
   const STORAGE_FILE = process.env.STORAGE_FILE_PATH || path.join(process.cwd(), "report_storage.json");
+
+  // 建立 system_users 数据库持久化 (Pure JS JSON DB)
+  const dbDir = path.dirname(STORAGE_FILE);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+  const dbPath = path.join(dbDir, "system_users.json");
+  console.log(`[JSON_DB] 正在初始化 system_users 数据库: ${dbPath}`);
+
+  const readUsersFile = (): any[] => {
+    try {
+      if (fs.existsSync(dbPath)) {
+        const content = fs.readFileSync(dbPath, "utf-8");
+        return JSON.parse(content) || [];
+      }
+    } catch (err) {
+      console.error("[JSON_DB] 读取数据库文件失败，已自动重置为数组:", err);
+    }
+    return [];
+  };
+
+  const writeUsersFile = (users: any[]) => {
+    try {
+      fs.writeFileSync(dbPath, JSON.stringify(users, null, 2), "utf-8");
+    } catch (err) {
+      console.error("[JSON_DB] 写入数据库文件失败:", err);
+    }
+  };
+
+  const dbRun = async (query: string, params: any[] = []): Promise<void> => {
+    const q = query.trim().replace(/\s+/g, " ");
+    if (q.includes("CREATE TABLE IF NOT EXISTS system_users")) {
+      if (!fs.existsSync(dbPath)) {
+        writeUsersFile([]);
+      }
+      return;
+    }
+
+    const users = readUsersFile();
+
+    if (q.includes("INSERT INTO system_users")) {
+      const [id, username, password_hash, salt, role] = params;
+      users.push({ id, username, password_hash, salt, role });
+      writeUsersFile(users);
+      return;
+    }
+
+    if (q.includes("UPDATE system_users SET")) {
+      const [username, password_hash, salt, role, id] = params;
+      const idx = users.findIndex(u => u.id === id);
+      if (idx !== -1) {
+        users[idx] = { id, username, password_hash, salt, role };
+        writeUsersFile(users);
+      }
+      return;
+    }
+
+    if (q.includes("DELETE FROM system_users WHERE id = ?")) {
+      const [id] = params;
+      const filtered = users.filter(u => u.id !== id);
+      writeUsersFile(filtered);
+      return;
+    }
+  };
+
+  const dbGet = async (query: string, params: any[] = []): Promise<any> => {
+    const q = query.trim().replace(/\s+/g, " ");
+    const users = readUsersFile();
+
+    if (q.includes("SELECT COUNT(*) as count FROM system_users WHERE role = '管理员'")) {
+      const count = users.filter(u => u.role === "管理员").length;
+      return { count };
+    }
+
+    if (q.includes("SELECT COUNT(*) as count FROM system_users")) {
+      return { count: users.length };
+    }
+
+    if (q.includes("SELECT * FROM system_users WHERE LOWER(username) = LOWER(?)")) {
+      const username = params[0];
+      const found = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+      return found || null;
+    }
+
+    if (q.includes("SELECT id FROM system_users WHERE LOWER(username) = LOWER(?)")) {
+      const username = params[0];
+      const found = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+      return found ? { id: found.id } : null;
+    }
+
+    if (q.includes("SELECT * FROM system_users WHERE id = ?")) {
+      const id = params[0];
+      const found = users.find(u => u.id === id);
+      return found || null;
+    }
+
+    return null;
+  };
+
+  const dbAll = async (query: string, params: any[] = []): Promise<any[]> => {
+    const q = query.trim().replace(/\s+/g, " ");
+    const users = readUsersFile();
+
+    if (q.includes("SELECT id, username, role FROM system_users")) {
+      return users.map(u => ({ id: u.id, username: u.username, role: u.role }));
+    }
+
+    return [];
+  };
+
+  // 1. 初始化 SQLite 数据库和建表
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS system_users (
+      id TEXT PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      role TEXT NOT NULL
+    )
+  `);
+
+  // 检查是否有用户，若无则初始化默认用户
+  const userCountRow = await dbGet("SELECT COUNT(*) as count FROM system_users");
+  if (userCountRow && userCountRow.count === 0) {
+    console.log("[SQLITE] 数据库无系统用户，正在初始化默认用户...");
+    const defaultUsers = [
+      { id: "1", username: "admin", password: "85201166", role: "管理员" },
+      { id: "2", username: "writer", password: "85201166", role: "撰写人" }
+    ];
+    for (const u of defaultUsers) {
+      const salt = crypto.randomBytes(16).toString("hex");
+      const hash = crypto.pbkdf2Sync(u.password, salt, 1000, 64, "sha512").toString("hex");
+      await dbRun(
+        "INSERT INTO system_users (id, username, password_hash, salt, role) VALUES (?, ?, ?, ?, ?)",
+        [u.id, u.username, hash, salt, u.role]
+      );
+    }
+    console.log("[SQLITE] 默认用户初始化完成！");
+  }
+
+  // 密码加密辅助函数
+  function hashPassword(password: string, salt: string): string {
+    return crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
+  }
+
+  // Token 签名/验证密钥
+  const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString("hex");
+
+  function createToken(userId: string, username: string, role: string): string {
+    const payload = JSON.stringify({ userId, username, role, expires: Date.now() + 24 * 60 * 60 * 1000 });
+    const hmac = crypto.createHmac("sha256", JWT_SECRET);
+    hmac.update(payload);
+    const signature = hmac.digest("hex");
+    return Buffer.from(payload).toString("base64") + "." + signature;
+  }
+
+  function verifyToken(token: string): { userId: string; username: string; role: string } | null {
+    try {
+      const [base64Payload, signature] = token.split(".");
+      if (!base64Payload || !signature) return null;
+      const payloadStr = Buffer.from(base64Payload, "base64").toString("utf-8");
+      const hmac = crypto.createHmac("sha256", JWT_SECRET);
+      hmac.update(payloadStr);
+      if (hmac.digest("hex") !== signature) return null;
+
+      const payload = JSON.parse(payloadStr);
+      if (payload.expires < Date.now()) return null; // 过期了
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
+  // 认证与鉴权中间件
+  const authenticateMiddleware = (req: any, res: any, next: any) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(419).json({ error: "未授权：请先登录系统。" });
+    }
+    const token = authHeader.substring(7);
+    const decoded = verifyToken(token);
+    if (!decoded) {
+      return res.status(419).json({ error: "登录过期或无效：请重新登录。" });
+    }
+    req.user = decoded;
+    next();
+  };
+
+  const adminOnlyMiddleware = (req: any, res: any, next: any) => {
+    if (!req.user || req.user.role !== "管理员") {
+      return res.status(403).json({ error: "权限不足：只有管理员可以进行此操作。" });
+    }
+    next();
+  };
 
   function loadStorage() {
     try {
@@ -589,6 +784,160 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  // ==========================================
+  //  系统账户数据库持久化 (SQLite) 认证 API 路由
+  // ==========================================
+
+  // 用户登录
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: "请输入用户名和密码。" });
+      }
+      const normalizedUser = username.trim();
+      const user = await dbGet("SELECT * FROM system_users WHERE LOWER(username) = LOWER(?)", [normalizedUser]);
+      if (!user) {
+        return res.status(401).json({ error: "安全校验失败：账号不存在或密码错误。" });
+      }
+      const hash = hashPassword(password, user.salt);
+      if (hash !== user.password_hash) {
+        return res.status(401).json({ error: "安全校验失败：账号不存在或密码错误。" });
+      }
+      const token = createToken(user.id, user.username, user.role);
+      res.json({
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          role: user.role
+        }
+      });
+    } catch (e: any) {
+      console.error("[AUTH API] Login error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 获取当前登录用户信息
+  app.get("/api/auth/me", authenticateMiddleware, async (req: any, res) => {
+    res.json({ user: req.user });
+  });
+
+  // 获取所有账号
+  app.get("/api/users", authenticateMiddleware, adminOnlyMiddleware, async (req, res) => {
+    try {
+      const users = await dbAll("SELECT id, username, role FROM system_users");
+      res.json({ users });
+    } catch (e: any) {
+      console.error("[USER API] Fetch users error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 创建新账号
+  app.post("/api/users", authenticateMiddleware, adminOnlyMiddleware, async (req, res) => {
+    try {
+      const { username, password, role } = req.body;
+      if (!username || !password || !role) {
+        return res.status(400).json({ error: "用户名、密码和角色均为必填项。" });
+      }
+      const trimmedUser = username.trim();
+      const trimmedPass = password.trim();
+
+      const existing = await dbGet("SELECT id FROM system_users WHERE LOWER(username) = LOWER(?)", [trimmedUser]);
+      if (existing) {
+        return res.status(400).json({ error: "该账号用户名已存在，请重新输入。" });
+      }
+
+      const id = String(Date.now());
+      const salt = crypto.randomBytes(16).toString("hex");
+      const hash = hashPassword(trimmedPass, salt);
+
+      await dbRun(
+        "INSERT INTO system_users (id, username, password_hash, salt, role) VALUES (?, ?, ?, ?, ?)",
+        [id, trimmedUser, hash, salt, role]
+      );
+
+      res.json({ success: true, user: { id, username: trimmedUser, role } });
+    } catch (e: any) {
+      console.error("[USER API] Create user error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 编辑已有账号
+  app.put("/api/users/:id", authenticateMiddleware, adminOnlyMiddleware, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { username, password, role } = req.body;
+
+      const user = await dbGet("SELECT * FROM system_users WHERE id = ?", [id]);
+      if (!user) {
+        return res.status(444).json({ error: "未找到该用户。" });
+      }
+
+      const trimmedUser = username ? username.trim() : user.username;
+      const trimmedRole = role || user.role;
+
+      if (user.username === "admin" && trimmedRole !== "管理员") {
+        return res.status(400).json({ error: "系统安全规则：禁止修改内置 'admin' 的管理员权限。" });
+      }
+
+      let newHash = user.password_hash;
+      let newSalt = user.salt;
+
+      if (password && password.trim()) {
+        newSalt = crypto.randomBytes(16).toString("hex");
+        newHash = hashPassword(password.trim(), newSalt);
+      }
+
+      await dbRun(
+        "UPDATE system_users SET username = ?, password_hash = ?, salt = ?, role = ? WHERE id = ?",
+        [trimmedUser, newHash, newSalt, trimmedRole, id]
+      );
+
+      res.json({ success: true, user: { id, username: trimmedUser, role: trimmedRole } });
+    } catch (e: any) {
+      console.error("[USER API] Edit user error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 删除账号
+  app.delete("/api/users/:id", authenticateMiddleware, adminOnlyMiddleware, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const currentUserId = req.user.userId;
+
+      const user = await dbGet("SELECT * FROM system_users WHERE id = ?", [id]);
+      if (!user) {
+        return res.status(444).json({ error: "未找到该用户。" });
+      }
+
+      if (user.username === "admin") {
+        return res.status(400).json({ error: "安全规则警告：不可删除内置系统超级管理员 'admin'。" });
+      }
+
+      if (user.id === currentUserId) {
+        return res.status(400).json({ error: "安全规则警告：您不能删除当前正在登录的账号。" });
+      }
+
+      if (user.role === "管理员") {
+        const adminCountRow = await dbGet("SELECT COUNT(*) as count FROM system_users WHERE role = '管理员'");
+        if (adminCountRow && adminCountRow.count <= 1) {
+          return res.status(400).json({ error: "安全规则警告：系统中必须至少保留一个管理员账户。" });
+        }
+      }
+
+      await dbRun("DELETE FROM system_users WHERE id = ?", [id]);
+      res.json({ success: true });
+    } catch (e: any) {
+      console.error("[USER API] Delete user error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // 获取自定义品牌 Logo
   app.get("/api/custom-logos", (req, res) => {
     try {
@@ -601,7 +950,7 @@ async function startServer() {
   });
 
   // 更新或删除单个品牌 Logo
-  app.post("/api/custom-logos", (req, res) => {
+  app.post("/api/custom-logos", authenticateMiddleware, adminOnlyMiddleware, (req, res) => {
     try {
       const { brandId, base64 } = req.body;
       if (!brandId) {
@@ -625,7 +974,7 @@ async function startServer() {
   });
 
   // 重置所有品牌 Logo
-  app.post("/api/custom-logos/reset-all", (req, res) => {
+  app.post("/api/custom-logos/reset-all", authenticateMiddleware, adminOnlyMiddleware, (req, res) => {
     try {
       const storage = loadStorage();
       storage.custom_logos = {};
@@ -638,7 +987,7 @@ async function startServer() {
   });
 
   // 系统健康状态与持久化挂载诊断接口
-  app.get("/api/admin/system-health", (req, res) => {
+  app.get("/api/admin/system-health", authenticateMiddleware, adminOnlyMiddleware, (req, res) => {
     try {
       const nodeVersion = process.version;
       const platform = process.platform;
@@ -728,7 +1077,7 @@ async function startServer() {
   });
 
   // 系统配置导出 API
-  app.get("/api/admin/export-config", (req, res) => {
+  app.get("/api/admin/export-config", authenticateMiddleware, adminOnlyMiddleware, (req, res) => {
     try {
       const storagePath = process.env.STORAGE_FILE_PATH || path.join(process.cwd(), "report_storage.json");
       if (!fs.existsSync(storagePath)) {
@@ -744,7 +1093,7 @@ async function startServer() {
   });
 
   // 备份 Shell 脚本一键下载 API
-  app.get("/api/admin/download-backup-sh", (req, res) => {
+  app.get("/api/admin/download-backup-sh", authenticateMiddleware, adminOnlyMiddleware, (req, res) => {
     const storagePath = process.env.STORAGE_FILE_PATH || "report_storage.json";
     const shContent = `#!/bin/bash
 # ==============================================================================
@@ -832,13 +1181,13 @@ echo "=================================================="
   });
 
   // 获取真实公网出口 IP，诊断是否发生了漂移
-  app.get("/api/real-outbound-ip", async (req, res) => {
+  app.get("/api/real-outbound-ip", authenticateMiddleware, adminOnlyMiddleware, async (req, res) => {
     const ip = await getPublicIP();
     return res.json({ ip });
   });
 
   // 测试千康数据库连通状态接口
-  app.get("/api/test-db-connection", async (req, res) => {
+  app.get("/api/test-db-connection", authenticateMiddleware, adminOnlyMiddleware, async (req, res) => {
     let connection: any = null;
     try {
       connection = await mysql.createConnection({

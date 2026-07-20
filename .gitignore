@@ -7,4 +7,6 @@ coverage/
 .env*
 !.env.example
 report_storage.json
+system_users.json
+system_users.db
 

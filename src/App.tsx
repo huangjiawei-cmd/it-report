@@ -48,35 +48,33 @@ import { LogoCustomizer } from "./components/LogoCustomizer";
 export default function App() {
   const loginCardRef = useRef<HTMLDivElement>(null);
   // 1. 系统用户和权限状态管理
-  const [systemUsers, setSystemUsers] = useState<SystemUser[]>(() => {
-    try {
-      const saved = localStorage.getItem("system_users");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // 确保后台专用管理员账户总是改成 admin / 85201166
-          const hasAdmin = parsed.some(u => u.username === "admin");
-          if (!hasAdmin) {
-            parsed.unshift({ id: "1", username: "admin", password: "85201166", role: "管理员" });
-          } else {
-            // 确保 admin 的密码总是 85201166
-            const adminUser = parsed.find(u => u.username === "admin");
-            if (adminUser) {
-              adminUser.password = "85201166";
-              adminUser.role = "管理员";
-            }
-          }
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.error(e);
+  const [systemUsers, setSystemUsers] = useState<SystemUser[]>([]);
+
+  // 封装具有 Authorization Header 的统一 Fetch 辅助工具
+  const apiFetch = async (url: string, options: RequestInit = {}) => {
+    const token = localStorage.getItem("auth_token");
+    const headers = {
+      ...options.headers,
+      "Content-Type": "application/json",
+    } as Record<string, string>;
+
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
     }
-    return [
-      { id: "1", username: "admin", password: "85201166", role: "管理员" },
-      { id: "2", username: "writer", password: "85201166", role: "撰写人" },
-    ];
-  });
+
+    const res = await fetch(url, { ...options, headers });
+    if (res.status === 419) {
+      // 登录过期，强制注销
+      localStorage.removeItem("auth_token");
+      localStorage.removeItem("current_user");
+      localStorage.setItem("it_admin_logged_in", "false");
+      setCurrentUser(null);
+      setIsAuthenticated(false);
+      alert("登录已过期，请重新登录系统。");
+      window.location.reload();
+    }
+    return res;
+  };
 
   const [currentUser, setCurrentUser] = useState<SystemUser | null>(() => {
     try {
@@ -85,16 +83,12 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
-    const isLoggedIn = localStorage.getItem("it_admin_logged_in") === "true";
-    if (isLoggedIn) {
-      return { id: "1", username: "admin", password: "85201166", role: "管理员" };
-    }
     return null;
   });
 
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("it_admin_logged_in") === "true";
+      return localStorage.getItem("it_admin_logged_in") === "true" && !!localStorage.getItem("auth_token");
     } catch (e) {
       return false;
     }
@@ -112,14 +106,25 @@ export default function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  // 保存系统用户列表到 localStorage
-  useEffect(() => {
+  // 从后端异步加载系统用户列表
+  const fetchSystemUsers = async () => {
+    if (!isAuthenticated || currentUser?.role !== "管理员") return;
     try {
-      localStorage.setItem("system_users", JSON.stringify(systemUsers));
+      const res = await apiFetch("/api/users");
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.users)) {
+          setSystemUsers(data.users);
+        }
+      }
     } catch (e) {
-      console.error(e);
+      console.error("[FRONTEND] 加载系统账号失败:", e);
     }
-  }, [systemUsers]);
+  };
+
+  useEffect(() => {
+    fetchSystemUsers();
+  }, [isAuthenticated, currentUser]);
 
   // 1.5. 审计日志状态与记录
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(() => {
@@ -175,7 +180,7 @@ export default function App() {
     setLoadingHealth(true);
     setHealthError(null);
     try {
-      const res = await fetch("/api/admin/system-health");
+      const res = await apiFetch("/api/admin/system-health");
       if (!res.ok) throw new Error("获取健康状态失败");
       const data = await res.json();
       setSystemHealth(data);
@@ -192,10 +197,57 @@ export default function App() {
     }
   }, [activeTab, fetchSystemHealth]);
 
+  const handleExportConfig = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    try {
+      const res = await apiFetch("/api/admin/export-config");
+      if (!res.ok) {
+        const err = await res.json();
+        alert(err.error || "下载配置快照失败");
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "report_storage_export.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert("下载配置快照出错: " + err.message);
+    }
+  };
+
+  const handleDownloadBackupSh = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    try {
+      const res = await apiFetch("/api/admin/download-backup-sh");
+      if (!res.ok) {
+        const err = await res.json();
+        alert(err.error || "下载备份脚本失败");
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "backup_report_system.sh";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert("下载备份脚本出错: " + err.message);
+    }
+  };
+
   const handleLogout = useCallback(() => {
     try {
       localStorage.removeItem("it_admin_logged_in");
       localStorage.removeItem("current_user");
+      localStorage.removeItem("auth_token");
     } catch (e) {
       console.error(e);
     }
@@ -209,33 +261,38 @@ export default function App() {
     setLoginLoading(true);
     setLoginError(null);
 
-    // 模拟安全验证延迟
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          username: loginUsername.trim(),
+          password: loginPassword.trim()
+        })
+      });
 
-    const normalizedUser = loginUsername.trim().toLowerCase();
-    const normalizedPass = loginPassword.trim();
+      const data = await res.json();
 
-    // 在系统用户列表中匹配账号与密码
-    const matchedUser = systemUsers.find(
-      (u) => u.username.toLowerCase() === normalizedUser && u.password === normalizedPass
-    );
-
-    if (matchedUser) {
-      try {
+      if (res.ok) {
         localStorage.setItem("it_admin_logged_in", "true");
-        localStorage.setItem("current_user", JSON.stringify(matchedUser));
-        localStorage.setItem("remembered_username", matchedUser.username);
-      } catch (err) {
-        console.error(err);
+        localStorage.setItem("auth_token", data.token);
+        localStorage.setItem("current_user", JSON.stringify(data.user));
+        localStorage.setItem("remembered_username", data.user.username);
+
+        setCurrentUser(data.user);
+        setIsAuthenticated(true);
+        setIsCustomizerUnlocked(false);
+        setActiveTab("config");
+      } else {
+        setLoginError(data.error || "安全校验失败：账号或密码错误。");
       }
-      setCurrentUser(matchedUser);
-      setIsAuthenticated(true);
-      setIsCustomizerUnlocked(false);
-      setActiveTab("config");
-    } else {
-      setLoginError("安全校验失败：账号或密码错误。");
+    } catch (err: any) {
+      setLoginError(err.message || "登录请求发生网络错误，请稍后重试。");
+    } finally {
+      setLoginLoading(false);
     }
-    setLoginLoading(false);
   };
 
   // 账号管理辅助表单状态及操作
@@ -254,7 +311,7 @@ export default function App() {
     }));
   };
 
-  const handleAddOrUpdateUser = (e: React.FormEvent) => {
+  const handleAddOrUpdateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setUserActionError(null);
     setUserActionSuccess(null);
@@ -262,69 +319,78 @@ export default function App() {
     const trimmedUser = newUsername.trim();
     const trimmedPass = newPassword.trim();
 
-    if (!trimmedUser || !trimmedPass) {
-      setUserActionError("用户名和密码不能为空。");
+    if (!trimmedUser) {
+      setUserActionError("用户名不能为空。");
       return;
     }
 
-    if (editingUserId) {
-      // 编辑已有用户
-      let hasError = false;
-      setSystemUsers(prev => {
-        return prev.map(u => {
-          if (u.id === editingUserId) {
-            if (u.username === "admin" && newRole !== "管理员") {
-              setUserActionError("系统安全规则：禁止修改内置 'admin' 的管理员权限。");
-              hasError = true;
-              return u;
-            }
-            return { ...u, username: trimmedUser, password: trimmedPass, role: newRole };
-          }
-          return u;
+    if (!editingUserId && !trimmedPass) {
+      setUserActionError("创建新用户时密码不能为空。");
+      return;
+    }
+
+    try {
+      if (editingUserId) {
+        // 编辑已有用户
+        const res = await apiFetch(`/api/users/${editingUserId}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            username: trimmedUser,
+            password: trimmedPass || undefined, // 为空表示不修改密码
+            role: newRole
+          })
         });
-      });
-      if (!hasError) {
-        setUserActionSuccess("用户账号修改成功！");
-        addAuditLog("修改账号", `修改了系统账号: ${trimmedUser} (新角色: ${newRole})`);
-        setEditingUserId(null);
-        setNewUsername("");
-        setNewPassword("");
-        setNewRole("撰写人");
-      }
-    } else {
-      // 创建新用户
-      const isDuplicate = systemUsers.some(u => u.username.toLowerCase() === trimmedUser.toLowerCase());
-      if (isDuplicate) {
-        setUserActionError("该账号用户名已存在，请重新输入。");
-        return;
-      }
 
-      const newUser: SystemUser = {
-        id: String(Date.now()),
-        username: trimmedUser,
-        password: trimmedPass,
-        role: newRole
-      };
+        const data = await res.json();
+        if (res.ok) {
+          setUserActionSuccess("用户账号修改成功！");
+          addAuditLog("修改账号", `修改了系统账号: ${trimmedUser} (新角色: ${newRole})`);
+          setEditingUserId(null);
+          setNewUsername("");
+          setNewPassword("");
+          setNewRole("撰写人");
+          fetchSystemUsers();
+        } else {
+          setUserActionError(data.error || "修改账号失败");
+        }
+      } else {
+        // 创建新用户
+        const res = await apiFetch("/api/users", {
+          method: "POST",
+          body: JSON.stringify({
+            username: trimmedUser,
+            password: trimmedPass,
+            role: newRole
+          })
+        });
 
-      setSystemUsers(prev => [...prev, newUser]);
-      setUserActionSuccess("成功创建新账户！");
-      addAuditLog("创建账号", `创建了系统账号: ${trimmedUser} (角色: ${newRole})`);
-      setNewUsername("");
-      setNewPassword("");
-      setNewRole("撰写人");
+        const data = await res.json();
+        if (res.ok) {
+          setUserActionSuccess("成功创建新账户！");
+          addAuditLog("创建账号", `创建了系统账号: ${trimmedUser} (角色: ${newRole})`);
+          setNewUsername("");
+          setNewPassword("");
+          setNewRole("撰写人");
+          fetchSystemUsers();
+        } else {
+          setUserActionError(data.error || "创建账号失败");
+        }
+      }
+    } catch (err: any) {
+      setUserActionError(err.message || "网络请求发生致命错误。");
     }
   };
 
   const handleEditUserClick = (user: SystemUser) => {
     setEditingUserId(user.id);
     setNewUsername(user.username);
-    setNewPassword(user.password);
+    setNewPassword(""); // 编辑时不反显密码，留空表示不修改
     setNewRole(user.role);
     setUserActionError(null);
     setUserActionSuccess(null);
   };
 
-  const handleDeleteUser = (userId: string) => {
+  const handleDeleteUser = async (userId: string) => {
     const userToDelete = systemUsers.find(u => u.id === userId);
     if (!userToDelete) return;
 
@@ -338,9 +404,24 @@ export default function App() {
       return;
     }
 
-    setSystemUsers(prev => prev.filter(u => u.id !== userId));
-    setUserActionSuccess(`已成功删除账户：${userToDelete.username}`);
-    addAuditLog("删除账号", `删除了系统账号: ${userToDelete.username} (原角色: ${userToDelete.role})`);
+    const confirmDel = window.confirm(`确定要彻底删除账号「${userToDelete.username}」吗？该操作不可逆。`);
+    if (!confirmDel) return;
+
+    try {
+      const res = await apiFetch(`/api/users/${userId}`, {
+        method: "DELETE"
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setUserActionSuccess(`已成功删除账户：${userToDelete.username}`);
+        addAuditLog("删除账号", `删除了系统账号: ${userToDelete.username} (原角色: ${userToDelete.role})`);
+        fetchSystemUsers();
+      } else {
+        alert(data.error || "删除账号失败");
+      }
+    } catch (err: any) {
+      alert(err.message || "删除账号时发生网络错误。");
+    }
   };
 
   const handleCancelEdit = () => {
@@ -2705,8 +2786,8 @@ export default function App() {
                         </p>
                       </div>
                       <a
-                        href="/api/admin/export-config"
-                        download="report_storage_export.json"
+                        href="#"
+                        onClick={handleExportConfig}
                         className="w-fit flex items-center justify-center gap-2 px-5 py-3 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-bold rounded-xl text-xs shadow-sm transition duration-150 cursor-pointer"
                       >
                         <Download className="h-3.5 w-3.5" />
@@ -2726,8 +2807,8 @@ export default function App() {
                         </p>
                       </div>
                       <a
-                        href="/api/admin/download-backup-sh"
-                        download="backup_report_system.sh"
+                        href="#"
+                        onClick={handleDownloadBackupSh}
                         className="w-fit flex items-center justify-center gap-2 px-5 py-3 bg-slate-800 hover:bg-slate-700 active:bg-slate-900 text-white font-bold rounded-xl text-xs shadow-sm transition duration-150 cursor-pointer"
                       >
                         <Terminal className="h-3.5 w-3.5" />

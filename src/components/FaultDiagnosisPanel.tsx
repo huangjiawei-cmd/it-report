@@ -43,8 +43,14 @@ export const FaultDiagnosisPanel: React.FC<FaultDiagnosisPanelProps> = ({
   const fetchRealIpAndDbStatus = async () => {
     setIsRefreshing(true);
     try {
+      const token = localStorage.getItem("auth_token");
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
       // 1) 获取真实公网出口 IP
-      const ipRes = await fetch("/api/real-outbound-ip");
+      const ipRes = await fetch("/api/real-outbound-ip", { headers });
       if (ipRes.ok) {
         const data = await ipRes.json();
         setRealOutboundIp(data.ip || "unknown");
@@ -53,7 +59,7 @@ export const FaultDiagnosisPanel: React.FC<FaultDiagnosisPanelProps> = ({
       }
 
       // 2) 重新检测数据库连通性
-      const dbRes = await fetch("/api/test-db-connection");
+      const dbRes = await fetch("/api/test-db-connection", { headers });
       if (dbRes.ok) {
         const data = await dbRes.json();
         setActiveDbStatus(data.connected ? "connected" : "disconnected");
