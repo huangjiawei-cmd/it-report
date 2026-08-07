@@ -99,8 +99,7 @@ import {
   TicketCategoriesChart,
   TicketShopRankingChart,
   RenovationChart,
-  SuppliersEfficiencyChart,
-  PdfContext
+  SuppliersEfficiencyChart
 } from "./ReportCharts";
 import { jsPDF } from "jspdf";
 import { toJpeg } from "html-to-image";
