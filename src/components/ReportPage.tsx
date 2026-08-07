@@ -586,8 +586,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
               setSlide8Comment(cleanHtml(sc.slide8Comment));
             }
             if (sc.customProjectSlides !== undefined && !focused?.startsWith("project_")) {
-              // 项目专页数据仅以本地 localStorage 为准，不接收服务器覆盖（避免协同同步引擎在用户编辑时覆盖输入）
-              // setCustomProjectSlides(sc.customProjectSlides);
+              // 项目专页数据通过协同同步引擎跨设备同步（服务器端持久化）
+              setCustomProjectSlides(sc.customProjectSlides);
             }
             if (sc.slideOrder !== undefined) {
               setSlideOrder(reconcileSlideOrder(sc.slideOrder, localEditsRef.current.customProjectSlides));

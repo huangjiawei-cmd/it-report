@@ -2376,6 +2376,72 @@ echo "=================================================="
     }
   });
 
+  // 协同同步端点：处理多用户实时编辑状态、评论、项目专页及页面排序的服务器端持久化与合流
+  app.post("/api/collaboration/sync", async (req, res) => {
+    try {
+      const { month, username, editingField, clientComments } = req.body;
+
+      if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ detail: "账期格式非法" });
+      }
+
+      const storage = loadStorage();
+      if (!storage.month_configs) {
+        storage.month_configs = {};
+      }
+      if (!storage.month_configs[month]) {
+        storage.month_configs[month] = {};
+      }
+
+      const config = storage.month_configs[month];
+
+      // 保存客户端提交的评论和项目专页数据到服务器
+      if (clientComments) {
+        if (!config.custom_comments) {
+          config.custom_comments = {};
+        }
+        const cc = config.custom_comments;
+
+        if (clientComments.slide2Bullets !== undefined) {
+          cc.slide2Bullets = clientComments.slide2Bullets;
+        }
+        if (clientComments.slide4Comment !== undefined) {
+          cc.slide4Comment = clientComments.slide4Comment;
+        }
+        if (clientComments.slide5Comment !== undefined) {
+          cc.slide5Comment = clientComments.slide5Comment;
+        }
+        if (clientComments.slide6Comment !== undefined) {
+          cc.slide6Comment = clientComments.slide6Comment;
+        }
+        if (clientComments.slide7Comment !== undefined) {
+          cc.slide7Comment = clientComments.slide7Comment;
+        }
+        if (clientComments.slide8Comment !== undefined) {
+          cc.slide8Comment = clientComments.slide8Comment;
+        }
+        if (clientComments.customProjectSlides !== undefined) {
+          cc.customProjectSlides = clientComments.customProjectSlides;
+        }
+        if (clientComments.slideOrder !== undefined) {
+          cc.slideOrder = clientComments.slideOrder;
+        }
+      }
+
+      saveStorage(storage);
+
+      // 返回当前月份的所有协同数据（供其他客户端同步）
+      res.json({
+        activeEditors: [], // 简化实现：不追踪活跃编辑器，后续可扩展
+        serverComments: config.custom_comments || {}
+      });
+
+    } catch (e: any) {
+      console.error("[Collaboration Sync] Error:", e);
+      res.status(500).json({ detail: e.message || "协同同步失败" });
+    }
+  });
+
   // Vite 挂载中间件或托管静态资源文件
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

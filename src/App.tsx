@@ -1050,6 +1050,25 @@ export default function App() {
   const autoPrefetch = useCallback(async (targetMonth: string, activeDraftData?: any) => {
     setLoading(true);
     setError(null);
+
+    // 首先尝试从服务器加载该月份已保存的配置（解决新设备/浏览器数据全0问题）
+    let serverConfig: any = null;
+    try {
+      const res = await fetch("/api/pipeline/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month: targetMonth, is_submit: "false" })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.has_saved_config && data.metrics) {
+          serverConfig = data.metrics;
+        }
+      }
+    } catch (e) {
+      console.warn("[Auto-Prefetch] 从服务器加载配置失败:", e);
+    }
+
     const formData = new FormData();
     formData.append("month", targetMonth);
     formData.append("is_submit", "false");
@@ -1063,6 +1082,11 @@ export default function App() {
         const val = activeDraftData[key];
         if (typeof val === "object") return JSON.stringify(val);
         return String(val);
+      }
+      // 其次尝试从服务器已保存配置中获取（解决新设备数据全0问题）
+      if (serverConfig && serverConfig[key] !== undefined && serverConfig[key] !== null && serverConfig[key] !== "") {
+        if (typeof serverConfig[key] === "object") return JSON.stringify(serverConfig[key]);
+        return String(serverConfig[key]);
       }
       try {
         const saved = localStorage.getItem(`draft_${targetMonth}_${key}`);
