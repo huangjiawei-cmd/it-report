@@ -119,6 +119,7 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
             <span className="text-[10px] text-slate-400 font-mono tracking-wider">
               PAGE {String(pageIndex + 1).padStart(2, "0")} / {String(totalPages).padStart(2, "0")}
             </span>
+            {!isPdf && (
             <span
               contentEditable
               suppressContentEditableWarning
@@ -128,6 +129,7 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
             >
               {slide.categoryTag || "项目专项"}
             </span>
+            )}
             {!isPdf && (
               <button
                 type="button"
