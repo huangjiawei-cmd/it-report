@@ -1146,50 +1146,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                   <h3 className="text-xs uppercase font-bold text-slate-500 tracking-wider flex items-center gap-2">
                     <span>📋 本月核心结论概要</span>
                   </h3>
-                  {!isPdf && (
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const next = [...slide2Bullets, "点击此处编辑新增结论..."];
-                          setSlide2Bullets(next);
-                          saveBullets(next);
-                        }}
-                        className="text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-md transition cursor-pointer shadow-3xs"
-                      >
-                        + 新增结论
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const defaults = getDefaultValues(metrics.curr_month_label, metrics);
-                          setSlide2Bullets(defaults.bullets);
-                          saveBullets(defaults.bullets);
-                        }}
-                        className="text-slate-500 hover:text-slate-700 font-medium bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-md transition cursor-pointer"
-                      >
-                        恢复默认结论
-                      </button>
-                    </div>
-                  )}
                 </div>
 
                 {slide2Bullets.length === 0 ? (
                   <div className="py-6 text-center border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
                     <p className="text-xs text-slate-500 mb-3">当前月份暂无核心结论条目</p>
-                    {!isPdf && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const defaults = getDefaultValues(metrics.curr_month_label, metrics);
-                          setSlide2Bullets(defaults.bullets);
-                          saveBullets(defaults.bullets);
-                        }}
-                        className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-xl transition cursor-pointer shadow-sm"
-                      >
-                        ✨ 自动生成 / 恢复本月核心结论
-                      </button>
-                    )}
                   </div>
                 ) : (
                   <ul className="space-y-3.5">
