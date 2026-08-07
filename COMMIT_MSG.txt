@@ -1,0 +1,5 @@
+fix: restore customProjectSlides from localStorage on page refresh
+
+- fix(ReportPage): add lazy initializer to customProjectSlides state to load from localStorage, preventing project slides from disappearing after page refresh
+- root cause: previous code initialized customProjectSlides as empty array [], so reconcileSlideOrder() stripped all project slide references from slideOrder on mount
+- data persistence: saveProjectSlides() already writes to localStorage (L447), but no corresponding read logic existed until now

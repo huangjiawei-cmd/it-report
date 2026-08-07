@@ -313,8 +313,14 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
   const [slide7Comment, setSlide7Comment] = useState<string>("");
   const [slide8Comment, setSlide8Comment] = useState<string>("");
 
-  // 动态重点项目专页清单状态
-  const [customProjectSlides, setCustomProjectSlides] = useState<ProjectSlide[]>([]);
+  // 动态重点项目专页清单状态（从 localStorage 恢复）
+  const [customProjectSlides, setCustomProjectSlides] = useState<ProjectSlide[]>(() => {
+    try {
+      const saved = localStorage.getItem(`${metrics.curr_month_label}_customProjectSlides`);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
 
   // 动态 PPT 页面自定义排序清单状态
   const [slideOrder, setSlideOrder] = useState<SlideOrderConfig[]>(() => {
