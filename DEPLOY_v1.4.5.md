@@ -38,26 +38,41 @@
 | `package.json` | 无变更 | 无需重新安装依赖 |
 | 数据库 / report_storage.json | 无变更 | 无需迁移数据 |
 
-### 部署步骤
+### 部署步骤（⚠️ 必须严格按顺序执行，不可跳过）
 
 ```bash
 # 1. 进入项目目录
 cd /path/to/it-report
 
-# 2. 拉取最新代码
+# 2. 拉取最新代码（必须确认 commit 为 8cb2916）
 git pull origin main
-
-# 3. 确认当前 commit 为 c181f45
 git log --oneline -1
-# 预期输出: c181f45 fix: PDF导出隐藏所有操作按钮及专项标签 (v1.4.5)
+# ✅ 预期输出: 8cb2916 docs: 添加 v1.4.4+v1.4.5 完整运维部署清单
+# ❌ 如果输出不是 8cb2916，说明拉取失败，立即停止并检查网络/Git配置
 
-# 4. 重新构建前端（如使用 PM2 或 systemd 管理 Node 服务则重启服务）
+# 3. 清除浏览器缓存（关键！旧 JS 缓存会导致 PDF 按钮残留）
+# 方法A: Ctrl+Shift+Delete 清除缓存后硬刷新 (Ctrl+F5)
+# 方法B: 打开 DevTools → Network 标签 → 勾选 "Disable cache" → 刷新页面
+
+# 4. 重新构建前端（必须执行，即使之前已构建过）
 npx vite build
+# ✅ 预期输出: ✓ built in X.XXs
+#  如果报错，立即停止并截图反馈
 
-# 5. 重启后端服务（如需）
+# 5. 重启后端服务
 # 若使用 PM2: pm2 restart it-report
-# 若直接运行: node server.ts
+# 若直接运行: 先 kill 旧进程，再 node server.ts
 ```
+
+### ⚠️ 如果 PDF 中仍有按钮残留，按以下顺序排查
+
+| 排查项 | 检查命令/操作 | 预期结果 |
+|-------|-------------|---------|
+| Git commit 是否正确 | `git log --oneline -1` | 必须是 `8cb2916` |
+| 前端是否重新构建 | 检查 `dist/` 目录修改时间 | 应晚于 git pull 时间 |
+| 浏览器是否清缓存 | DevTools → Application → Clear storage | 已清除 |
+| ReportPage.tsx 是否有 `{!isPdf &&` | `grep -n "!isPdf" src/components/ReportPage.tsx` | 至少 5 处匹配 |
+| 导出时是否用新页面 | 关闭所有旧标签页，重新打开月报 | 无旧实例干扰 |
 
 ### 验证要点
 
