@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useContext } from "react";
 import { ProjectSlide, ProjectMilestone, ProjectMetric } from "../types";
+import { PdfContext } from "./ReportCharts";
 
 interface ReportProjectSlideProps {
   slide: ProjectSlide;
@@ -16,6 +17,7 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
   onUpdate,
   onDelete,
 }) => {
+  const isPdf = useContext(PdfContext);
   const handleTitleChange = (e: React.FocusEvent<HTMLHeadingElement>) => {
     const text = e.currentTarget.innerText;
     if (text !== slide.title) {
@@ -126,15 +128,17 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
             >
               {slide.categoryTag || "项目专项"}
             </span>
-            <button
-              type="button"
-              onClick={onDelete}
-              className="print:hidden text-xs text-rose-500 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 cursor-pointer"
-              title="删除此项目专页"
-            >
-              <span>🗑️</span>
-              <span>删除专页</span>
-            </button>
+            {!isPdf && (
+              <button
+                type="button"
+                onClick={onDelete}
+                className="text-xs text-rose-500 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2.5 py-1 rounded-lg font-bold transition flex items-center gap-1 cursor-pointer"
+                title="删除此项目专页"
+              >
+                <span>🗑️</span>
+                <span>删除专页</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -241,13 +245,15 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
               >
                 {slide.milestonesTitle || "🗓️ 项目推进里程碑节点"}
               </span>
-              <button
-                type="button"
-                onClick={handleAddMilestone}
-                className="print:hidden text-[10px] bg-white border border-slate-200 text-indigo-600 font-bold px-2 py-0.5 rounded-lg hover:bg-indigo-50 transition cursor-pointer"
-              >
-                + 加节点
-              </button>
+              {!isPdf && (
+                <button
+                  type="button"
+                  onClick={handleAddMilestone}
+                  className="text-[10px] bg-white border border-slate-200 text-indigo-600 font-bold px-2 py-0.5 rounded-lg hover:bg-indigo-50 transition cursor-pointer"
+                >
+                  + 加节点
+                </button>
+              )}
             </div>
             <div className="space-y-3 my-auto">
               {slide.milestones.map((ms) => (
@@ -298,14 +304,16 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
                       {ms.desc}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteMilestone(ms.id)}
-                    className="print:hidden opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 font-bold px-1 transition text-xs"
-                    title="删除节点"
-                  >
-                    ×
-                  </button>
+                  {!isPdf && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteMilestone(ms.id)}
+                      className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 font-bold px-1 transition text-xs"
+                      title="删除节点"
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -322,13 +330,15 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
               >
                 {slide.bulletsTitle || "📋 项目核心成果与保障措施"}
               </span>
-              <button
-                type="button"
-                onClick={handleAddBullet}
-                className="print:hidden text-[10px] bg-white border border-slate-200 text-indigo-600 font-bold px-2 py-0.5 rounded-lg hover:bg-indigo-50 transition cursor-pointer"
-              >
-                + 添加要点
-              </button>
+              {!isPdf && (
+                <button
+                  type="button"
+                  onClick={handleAddBullet}
+                  className="text-[10px] bg-white border border-slate-200 text-indigo-600 font-bold px-2 py-0.5 rounded-lg hover:bg-indigo-50 transition cursor-pointer"
+                >
+                  + 添加要点
+                </button>
+              )}
             </div>
             <div className="space-y-2.5 my-auto">
               {slide.contentBullets.map((bullet, bIdx) => (
@@ -341,14 +351,16 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
                     dangerouslySetInnerHTML={{ __html: bullet }}
                     className="flex-1 text-xs text-slate-700 leading-relaxed bg-white border border-slate-200/60 p-2.5 rounded-xl outline-none hover:border-indigo-300 focus:bg-amber-50/50 shadow-2xs"
                   />
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteBullet(bIdx)}
-                    className="print:hidden opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 font-bold px-1.5 transition text-xs"
-                    title="删除此要点"
-                  >
-                    ×
-                  </button>
+                  {!isPdf && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteBullet(bIdx)}
+                      className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 font-bold px-1.5 transition text-xs"
+                      title="删除此要点"
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
