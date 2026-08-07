@@ -1405,29 +1405,6 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
-                  {!isPdf && (
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => handleLoadPrevComment("slide4Comment", getDefaultValues(metrics.curr_month_label, metrics).s4)}
-                        className="text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-0.5 rounded-md transition cursor-pointer shadow-3xs"
-                        title="载入上月该项保存的分析文字"
-                      >
-                        📋 继承上月分析
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const defaults = getDefaultValues(metrics.curr_month_label, metrics);
-                          saveSlide4Comment(defaults.s4);
-                        }}
-                        className="text-slate-500 hover:text-slate-700 font-medium bg-slate-100 hover:bg-slate-200 px-2.5 py-0.5 rounded-md transition cursor-pointer"
-                        title="恢复当前月份基于数据生成的默认分析"
-                      >
-                         恢复默认分析
-                      </button>
-                    </div>
-                  )}
                 </div>
                 <CollaborativeInput
                   value={slide4Comment}
@@ -1594,29 +1571,6 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
-                  {!isPdf && (
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => handleLoadPrevComment("slide5Comment", getDefaultValues(metrics.curr_month_label, metrics).s5)}
-                        className="text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-0.5 rounded-md transition cursor-pointer shadow-3xs"
-                        title="载入上月该项保存的分析文字"
-                      >
-                        📋 继承上月分析
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const defaults = getDefaultValues(metrics.curr_month_label, metrics);
-                          saveSlide5Comment(defaults.s5);
-                        }}
-                        className="text-slate-500 hover:text-slate-700 font-medium bg-slate-100 hover:bg-slate-200 px-2.5 py-0.5 rounded-md transition cursor-pointer"
-                        title="恢复当前月份基于数据生成的默认分析"
-                      >
-                         恢复默认分析
-                      </button>
-                    </div>
-                  )}
                 </div>
                 <CollaborativeInput
                   value={slide5Comment}
@@ -1725,29 +1679,6 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
-                  {!isPdf && (
-                  <div className="flex items-center gap-2 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={() => handleLoadPrevComment("slide6Comment", getDefaultValues(metrics.curr_month_label, metrics).s6)}
-                      className="text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-0.5 rounded-md transition cursor-pointer shadow-3xs"
-                      title="载入上月该项保存的分析文字"
-                    >
-                      📋 继承上月分析
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const defaults = getDefaultValues(metrics.curr_month_label, metrics);
-                        saveSlide6Comment(defaults.s6);
-                      }}
-                      className="text-slate-500 hover:text-slate-700 font-medium bg-slate-100 hover:bg-slate-200 px-2.5 py-0.5 rounded-md transition cursor-pointer"
-                      title="恢复当前月份基于数据生成的默认分析"
-                    >
-                      ✨ 恢复默认分析
-                    </button>
-                  </div>
-                  )}
                 </div>
                 <CollaborativeInput
                   value={slide6Comment}
@@ -1859,29 +1790,6 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
-                  {!isPdf && (
-                  <div className="flex items-center gap-2 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={() => handleLoadPrevComment("slide7Comment", getDefaultValues(metrics.curr_month_label, metrics).s7)}
-                      className="text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-0.5 rounded-md transition cursor-pointer shadow-3xs"
-                      title="载入上月该项保存的分析文字"
-                    >
-                      📋 继承上月分析
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const defaults = getDefaultValues(metrics.curr_month_label, metrics);
-                        saveSlide7Comment(defaults.s7);
-                      }}
-                      className="text-slate-500 hover:text-slate-700 font-medium bg-slate-100 hover:bg-slate-200 px-2.5 py-0.5 rounded-md transition cursor-pointer"
-                      title="恢复当前月份基于数据生成的默认分析"
-                    >
-                      ✨ 恢复默认分析
-                    </button>
-                  </div>
-                  )}
                 </div>
                 <CollaborativeInput
                   value={slide7Comment}
@@ -1953,29 +1861,6 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
-                  {!isPdf && (
-                  <div className="flex items-center gap-2 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={() => handleLoadPrevComment("slide8Comment", getDefaultValues(metrics.curr_month_label, metrics).s8)}
-                      className="text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-0.5 rounded-md transition cursor-pointer shadow-3xs"
-                      title="载入上月该项保存的分析文字"
-                    >
-                      📋 继承上月分析
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const defaults = getDefaultValues(metrics.curr_month_label, metrics);
-                        saveSlide8Comment(defaults.s8);
-                      }}
-                      className="text-slate-500 hover:text-slate-700 font-medium bg-slate-100 hover:bg-slate-200 px-2.5 py-0.5 rounded-md transition cursor-pointer"
-                      title="恢复当前月份基于数据生成的默认分析"
-                    >
-                      ✨ 恢复默认分析
-                    </button>
-                  </div>
-                  )}
                 </div>
                 <CollaborativeInput
                   value={slide8Comment}

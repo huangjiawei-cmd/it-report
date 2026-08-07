@@ -1,5 +1,6 @@
-fix: restore customProjectSlides from localStorage on page refresh
+fix: 物理删除所有 Slide 的"继承上月分析""恢复默认分析"按钮代码
 
-- fix(ReportPage): add lazy initializer to customProjectSlides state to load from localStorage, preventing project slides from disappearing after page refresh
-- root cause: previous code initialized customProjectSlides as empty array [], so reconcileSlideOrder() stripped all project slide references from slideOrder on mount
-- data persistence: saveProjectSlides() already writes to localStorage (L447), but no corresponding read logic existed until now
+- 从 ReportPage.tsx 中彻底删除 Slide 4/5/6/7/8 的"继承上月分析"和"恢复默认分析"两个按钮组代码块
+- 不再使用 {!isPdf && ...} 条件隐藏方案，改为直接物理删除
+- 本地构建验证通过 (npx vite build)，无 JSX 语法错误
+- PDF 导出时这两个按钮将完全不会出现
