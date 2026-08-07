@@ -232,10 +232,10 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
           ))}
         </div>
 
-        {/* Middle Section: Left Milestones + Right Core Bullets */}
-        <div className="grid grid-cols-12 gap-5 mb-4">
-          {/* Milestones Time Progress */}
-          <div className="col-span-5 border border-slate-200/80 rounded-2xl p-4 bg-slate-50/30 flex flex-col justify-between shadow-2xs">
+        {/* Middle Section: Full-width Milestones */}
+        <div className="mb-4">
+          {/* Milestones Time Progress - Full Width */}
+          <div className="border border-slate-200/80 rounded-2xl p-4 bg-slate-50/30 flex flex-col justify-between shadow-2xs">
             <div className="flex justify-between items-center mb-3">
               <span
                 contentEditable
@@ -310,53 +310,6 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
                       onClick={() => handleDeleteMilestone(ms.id)}
                       className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 font-bold px-1 transition text-xs"
                       title="删除节点"
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Right Core Content Bullets */}
-          <div className="col-span-7 border border-slate-200/80 rounded-2xl p-4 bg-slate-50/30 flex flex-col justify-between shadow-2xs">
-            <div className="flex justify-between items-center mb-3">
-              <span
-                contentEditable
-                suppressContentEditableWarning
-                onBlur={(e) => onUpdate({ bulletsTitle: e.currentTarget.innerText })}
-                className="text-xs font-bold text-indigo-900 flex items-center gap-1.5 outline-none hover:bg-amber-50 rounded px-1"
-              >
-                {slide.bulletsTitle || "📋 项目核心成果与保障措施"}
-              </span>
-              {!isPdf && (
-                <button
-                  type="button"
-                  onClick={handleAddBullet}
-                  className="text-[10px] bg-white border border-slate-200 text-indigo-600 font-bold px-2 py-0.5 rounded-lg hover:bg-indigo-50 transition cursor-pointer"
-                >
-                  + 添加要点
-                </button>
-              )}
-            </div>
-            <div className="space-y-2.5 my-auto">
-              {slide.contentBullets.map((bullet, bIdx) => (
-                <div key={bIdx} className="flex items-start gap-2 group relative">
-                  <span className="flex-none text-indigo-600 font-bold text-xs mt-0.5">•</span>
-                  <div
-                    contentEditable
-                    suppressContentEditableWarning
-                    onBlur={(e) => handleBulletChange(bIdx, e.currentTarget.innerHTML)}
-                    dangerouslySetInnerHTML={{ __html: bullet }}
-                    className="flex-1 text-xs text-slate-700 leading-relaxed bg-white border border-slate-200/60 p-2.5 rounded-xl outline-none hover:border-indigo-300 focus:bg-amber-50/50 shadow-2xs"
-                  />
-                  {!isPdf && (
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteBullet(bIdx)}
-                      className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-500 font-bold px-1.5 transition text-xs"
-                      title="删除此要点"
                     >
                       ×
                     </button>

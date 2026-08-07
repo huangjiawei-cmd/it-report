@@ -17,6 +17,7 @@ interface FaultDiagnosisPanelProps {
   dbStatus: "loading" | "connected" | "disconnected";
   serverIp: string;
   metrics: ReportMetrics | null;
+  onDbStatusChange?: (status: "loading" | "connected" | "disconnected") => void;
 }
 
 export const FaultDiagnosisPanel: React.FC<FaultDiagnosisPanelProps> = ({
@@ -33,7 +34,8 @@ export const FaultDiagnosisPanel: React.FC<FaultDiagnosisPanelProps> = ({
   currNewShops,
   dbStatus,
   serverIp,
-  metrics
+  metrics,
+  onDbStatusChange
 }) => {
   const [realOutboundIp, setRealOutboundIp] = useState<string>("检测中...");
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -62,18 +64,29 @@ export const FaultDiagnosisPanel: React.FC<FaultDiagnosisPanelProps> = ({
       const dbRes = await fetch("/api/test-db-connection", { headers });
       if (dbRes.ok) {
         const data = await dbRes.json();
-        setActiveDbStatus(data.connected ? "connected" : "disconnected");
+        const newStatus = data.connected ? "connected" : "disconnected";
+        setActiveDbStatus(newStatus);
+        onDbStatusChange?.(newStatus);
       } else {
         setActiveDbStatus("disconnected");
+        onDbStatusChange?.("disconnected");
       }
     } catch (e) {
       console.error("Diagnosis fetch error:", e);
       setRealOutboundIp("网络超时");
       setActiveDbStatus("disconnected");
+      onDbStatusChange?.("disconnected");
     } finally {
       setIsRefreshing(false);
     }
   };
+
+  // 当 activeDbStatus 变化时通知父组件
+  useEffect(() => {
+    if (activeDbStatus !== dbStatus) {
+      onDbStatusChange?.(activeDbStatus);
+    }
+  }, [activeDbStatus]);
 
   useEffect(() => {
     fetchRealIpAndDbStatus();

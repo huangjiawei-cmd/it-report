@@ -1726,6 +1726,7 @@ export default function App() {
             dbStatus={dbStatus}
             serverIp={serverIp}
             metrics={metrics}
+            onDbStatusChange={(newStatus) => setDbStatus(newStatus)}
           />
         </div>
       </div>
