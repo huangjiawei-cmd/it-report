@@ -1,0 +1,176 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* 全局默认现代无衬线排版，防止不同系统默认中文字体回落至宋体 */
+html, body, button, input, select, textarea, [contenteditable] {
+  font-family: "Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 强制开启 GPU 硬件加速并对齐物理像素，彻底消除浏览器在处理响应式缩放与百分比宽高时产生的边缘与文本“朦胧模糊”现象 */
+.print-slide-content, .print-slide-page, .relative.overflow-hidden, .w-full.max-w-\[1120px\] {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  transform: translate3d(0, 0, 0);
+  -webkit-transform-style: preserve-3d;
+  transform-style: preserve-3d;
+}
+
+/* 打印及页面全局优化 */
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 0 !important;
+  }
+  
+  html, body {
+    width: 297mm !important;
+    height: 210mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    overflow: visible !important;
+  }
+
+  #root {
+    width: 297mm !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  
+  /* 隐藏控制舱和打印动作按钮，保证PDF文件的纯净与高规格 */
+  .no-print, header, footer, form, #report-anchor {
+    display: none !important;
+  }
+  
+  /* 强制每一页幻灯片单独占满一页 PDF */
+  .print-slide-page {
+    width: 297mm !important;
+    height: 210mm !important;
+    page-break-before: always !important;
+    page-break-after: always !important;
+    page-break-inside: avoid !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: #ffffff !important;
+    overflow: hidden !important;
+  }
+  
+  .print-slide-page:first-child {
+    page-break-before: avoid !important;
+  }
+  
+  .print-slide-page:last-child {
+    page-break-after: avoid !important;
+  }
+  
+  /* 使内容在 A4 页面内完美贴合 */
+  .print-slide-content {
+    width: 1120px !important;
+    height: 700px !important;
+    min-width: 1120px !important;
+    min-height: 700px !important;
+    max-width: 1120px !important;
+    max-height: 700px !important;
+    transform: scale(0.99) !important;
+    transform-origin: center center !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    background: #ffffff !important;
+    overflow: hidden !important;
+  }
+
+  /* 打印时使文本输入框不显示边框 */
+  .editable-commentary {
+    border: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+  }
+
+  /* Ensure color and graphics are preserved */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
+/* 丰富精致的过渡动画 */
+.fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+/* 统一富文本输入框及子元素样式，防止复制粘贴外部文本时污染字体、字号、字重与颜色，确保各平台高保真、纯净、现代的无衬线排版 */
+.editable-commentary {
+  font-family: "Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif !important;
+  font-size: 12px !important; /* 强制 text-xs 标准大小 */
+  color: #334155 !important; /* 强制 text-slate-700 柔和深灰颜色 */
+  line-height: 1.625 !important; /* 强制 leading-relaxed 行高，美观呼吸感 */
+}
+
+.editable-commentary * {
+  font-family: inherit !important;
+  font-size: inherit !important;
+  color: inherit !important;
+  line-height: inherit !important;
+  background-color: transparent !important;
+  background: transparent !important;
+}
+
+.editable-commentary *:not(b):not(strong) {
+  font-weight: normal !important;
+  font-style: normal !important;
+}
+
+.editable-commentary b,
+.editable-commentary strong {
+  font-weight: 700 !important;
+}
+
+.editable-commentary p,
+.editable-commentary div {
+  margin: 0 !important;
+  padding: 0 !important;
+  line-height: inherit !important;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes vibrateChamber {
+  0% { transform: translate(0, 0); }
+  20% { transform: translate(-1.5px, 1px); }
+  40% { transform: translate(-1px, -1.5px); }
+  60% { transform: translate(1.5px, 1.5px); }
+  80% { transform: translate(1px, -1px); }
+  100% { transform: translate(0, 0); }
+}
+
+.animate-vibrate-chamber {
+  animation: vibrateChamber 0.15s cubic-bezier(.36,.07,.19,.97) both;
+}
+
