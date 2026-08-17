@@ -143,6 +143,12 @@ interface ReportPageProps {
   registerExportFn?: (fn: () => Promise<void>) => void;
 }
 
+// 参与多端协同同步的全部字段清单（脏数据追踪与卸载补发共用）
+const SYNC_FIELD_KEYS = [
+  "slide2Bullets", "slide4Comment", "slide5Comment", "slide6Comment",
+  "slide7Comment", "slide8Comment", "customProjectSlides", "slideOrder"
+] as const;
+
 const cleanHtml = (html: string): string => {
   if (!html) return "";
   try {
@@ -349,6 +355,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
       localStorage.setItem(`${metrics.curr_month_label}_slideOrder`, JSON.stringify(nextOrder));
     } catch (e) {}
     localEditsRef.current.slideOrder = nextOrder;
+    markDirty("slideOrder");
   };
 
   // 拖拽排序状态与 Handler 引擎
@@ -423,6 +430,26 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     slideOrder: []
   });
 
+  // [多端同步修复] 脏数据计数器：仅当用户主动修改某字段时才标记为脏，
+  // 心跳同步只上报脏字段，杜绝新打开的设备把空初始状态上传并覆盖其他设备已保存的数据
+  const dirtyCounterRef = useRef<Record<string, number>>({});
+  const ackedCounterRef = useRef<Record<string, number>>({});
+  const syncSessionMonthRef = useRef<string | null>(null);
+  const markDirty = (field: string) => {
+    dirtyCounterRef.current[field] = (dirtyCounterRef.current[field] || 0) + 1;
+  };
+
+  // 收集当前仍未确认送达的脏字段内容
+  const collectDirtyComments = () => {
+    const comments: any = {};
+    for (const key of SYNC_FIELD_KEYS) {
+      if ((dirtyCounterRef.current[key] || 0) > (ackedCounterRef.current[key] || 0)) {
+        comments[key] = (localEditsRef.current as any)[key];
+      }
+    }
+    return comments;
+  };
+
   // 当 React 的主 state 发生更新（如后端同步或组件初次加载）时，同步备份至临时 ref (仅限非 focus 状态，避免在打字时被覆盖)
   useEffect(() => {
     if (!editingField || !editingField.startsWith("slide2Bullet")) {
@@ -454,6 +481,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
       localStorage.setItem(`${metrics.curr_month_label}_customProjectSlides`, JSON.stringify(nextSlides));
     } catch (e) {}
     localEditsRef.current.customProjectSlides = nextSlides;
+    markDirty("customProjectSlides");
   };
 
   const handleAddProjectSlide = () => {
@@ -522,6 +550,27 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
   useEffect(() => {
     if (!currentUser) return;
 
+    // [多端同步修复] 切换账期时，先将上一个账期残留的脏数据补发一次防止丢失，再重置脏计数器
+    if (syncSessionMonthRef.current && syncSessionMonthRef.current !== month) {
+      const flushComments = collectDirtyComments();
+      if (Object.keys(flushComments).length > 0) {
+        fetch("/api/collaboration/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            month: syncSessionMonthRef.current,
+            username: stateRefs.current.username,
+            editingField: null,
+            syncVersion: 2,
+            clientComments: flushComments
+          })
+        }).catch(() => {});
+      }
+      dirtyCounterRef.current = {};
+      ackedCounterRef.current = {};
+    }
+    syncSessionMonthRef.current = month;
+
     let isSubscribed = true;
 
     const performSync = async () => {
@@ -529,20 +578,19 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
       const payload: any = {
         month: current.month,
         username: current.username,
-        editingField: current.editingField
+        editingField: current.editingField,
+        // [多端同步修复] v2 协议标识：字段出现即代表用户主动修改，服务端可直接信任
+        syncVersion: 2
       };
 
-      // 仅在当前用户正在编辑该文本框或操作专页时，才将客户端最新内容提交至后端进行多端实时合流
-      payload.clientComments = {
-        slide2Bullets: localEditsRef.current.slide2Bullets,
-        slide4Comment: localEditsRef.current.slide4Comment,
-        slide5Comment: localEditsRef.current.slide5Comment,
-        slide6Comment: localEditsRef.current.slide6Comment,
-        slide7Comment: localEditsRef.current.slide7Comment,
-        slide8Comment: localEditsRef.current.slide8Comment,
-        customProjectSlides: localEditsRef.current.customProjectSlides,
-        slideOrder: localEditsRef.current.slideOrder
-      };
+      // [多端同步修复] 只上报用户主动修改过的脏字段，新打开的设备不再把空初始状态推送给服务端，
+      // 从根本上消除“后写覆盖”导致专项页与批注跨电脑不可见的问题
+      const clientComments = collectDirtyComments();
+      const sentSnapshot: Record<string, number> = {};
+      for (const key of Object.keys(clientComments)) {
+        sentSnapshot[key] = dirtyCounterRef.current[key] || 0;
+      }
+      payload.clientComments = clientComments;
 
       try {
         const res = await fetch("/api/collaboration/sync", {
@@ -556,6 +604,13 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
         if (res.ok) {
           const data = await res.json();
           if (!isSubscribed) return;
+
+          // [多端同步修复] 将已成功送达的脏字段标记为已确认；若发送期间用户又产生了新修改则保持脏状态，下轮心跳继续补发
+          for (const key of Object.keys(sentSnapshot)) {
+            if ((dirtyCounterRef.current[key] || 0) === sentSnapshot[key]) {
+              ackedCounterRef.current[key] = sentSnapshot[key];
+            }
+          }
 
           // 1) 同步其他在线协同成员的位置信息
           if (data.activeEditors) {
@@ -590,7 +645,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
               setCustomProjectSlides(sc.customProjectSlides);
             }
             if (sc.slideOrder !== undefined) {
-              setSlideOrder(reconcileSlideOrder(sc.slideOrder, localEditsRef.current.customProjectSlides));
+              // [多端同步修复] 优先使用本轮刚从服务端拿到的专页清单做调和，避免 localEditsRef 尚未更新时把专项页从排序中误剔除
+              const latestSlides = (sc.customProjectSlides !== undefined && !focused?.startsWith("project_"))
+                ? sc.customProjectSlides
+                : localEditsRef.current.customProjectSlides;
+              setSlideOrder(reconcileSlideOrder(sc.slideOrder, latestSlides));
             }
           }
         }
@@ -611,7 +670,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
       isSubscribed = false;
       clearInterval(timer);
 
-      // 组件卸载时释放本人的编辑锁
+      // 组件卸载时释放本人的编辑锁，并补发尚未同步的脏数据防止丢失
       const current = stateRefs.current;
       fetch("/api/collaboration/sync", {
         method: "POST",
@@ -619,7 +678,9 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
         body: JSON.stringify({
           month: current.month,
           username: current.username,
-          editingField: null
+          editingField: null,
+          syncVersion: 2,
+          clientComments: collectDirtyComments()
         })
       }).catch(() => {});
     };
@@ -881,6 +942,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     try {
       localStorage.setItem(`${metrics.curr_month_label}_slide2Bullets`, JSON.stringify(next));
     } catch (e) {}
+    markDirty("slide2Bullets");
   };
 
   const saveSlide4Comment = (text: string) => {
@@ -893,6 +955,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     try {
       localStorage.setItem(`${metrics.curr_month_label}_slide4Comment`, cleaned);
     } catch (e) {}
+    markDirty("slide4Comment");
   };
 
   const saveSlide5Comment = (text: string) => {
@@ -905,6 +968,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     try {
       localStorage.setItem(`${metrics.curr_month_label}_slide5Comment`, cleaned);
     } catch (e) {}
+    markDirty("slide5Comment");
   };
 
   const saveSlide6Comment = (text: string) => {
@@ -917,6 +981,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     try {
       localStorage.setItem(`${metrics.curr_month_label}_slide6Comment`, cleaned);
     } catch (e) {}
+    markDirty("slide6Comment");
   };
 
   const saveSlide7Comment = (text: string) => {
@@ -929,6 +994,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     try {
       localStorage.setItem(`${metrics.curr_month_label}_slide7Comment`, cleaned);
     } catch (e) {}
+    markDirty("slide7Comment");
   };
 
   const saveSlide8Comment = (text: string) => {
@@ -941,6 +1007,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     try {
       localStorage.setItem(`${metrics.curr_month_label}_slide8Comment`, cleaned);
     } catch (e) {}
+    markDirty("slide8Comment");
   };
 
   // 单个分析框：手动载入上月文本

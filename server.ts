@@ -1244,10 +1244,16 @@ echo "=================================================="
   // 多端协同编辑实时监听与同步接口 (基于 Server DB & Memory)
   app.post("/api/collaboration/sync", (req, res) => {
     try {
-      const { month, username, editingField, clientComments } = req.body;
+      const { month, username, editingField, clientComments, syncVersion } = req.body;
       if (!month || !username) {
         return res.status(400).json({ error: "Missing month or username" });
       }
+
+      // [多端同步修复] v2 协议客户端（脏数据推送）：字段出现即代表用户主动修改，可直接信任；
+      // 旧版客户端（无标识）会无差别全量上传字段，仅接受非空内容，防止新打开设备的空初始状态冲刷其他设备已保存的数据
+      const isV2Client = syncVersion === 2;
+      const hasVisibleText = (s: any) =>
+        typeof s === "string" && s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, "").trim().length > 0;
 
       const now = Date.now();
       const sessionKey = `${month}_${username}`;
@@ -1285,16 +1291,17 @@ echo "=================================================="
         }
         const sComments = storage.month_configs[month].custom_comments;
 
-        if (clientComments.slide2Bullets && Array.isArray(clientComments.slide2Bullets) && clientComments.slide2Bullets.length > 0) {
+        if (clientComments.slide2Bullets !== undefined && (isV2Client || (Array.isArray(clientComments.slide2Bullets) && clientComments.slide2Bullets.length > 0))) {
           sComments.slide2Bullets = clientComments.slide2Bullets;
         }
-        if (clientComments.slide4Comment !== undefined) sComments.slide4Comment = clientComments.slide4Comment;
-        if (clientComments.slide5Comment !== undefined) sComments.slide5Comment = clientComments.slide5Comment;
-        if (clientComments.slide6Comment !== undefined) sComments.slide6Comment = clientComments.slide6Comment;
-        if (clientComments.slide7Comment !== undefined) sComments.slide7Comment = clientComments.slide7Comment;
-        if (clientComments.slide8Comment !== undefined) sComments.slide8Comment = clientComments.slide8Comment;
-        if (clientComments.customProjectSlides !== undefined) sComments.customProjectSlides = clientComments.customProjectSlides;
-        if (clientComments.slideOrder !== undefined) sComments.slideOrder = clientComments.slideOrder;
+        if (clientComments.slide4Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide4Comment))) sComments.slide4Comment = clientComments.slide4Comment;
+        if (clientComments.slide5Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide5Comment))) sComments.slide5Comment = clientComments.slide5Comment;
+        if (clientComments.slide6Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide6Comment))) sComments.slide6Comment = clientComments.slide6Comment;
+        if (clientComments.slide7Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide7Comment))) sComments.slide7Comment = clientComments.slide7Comment;
+        if (clientComments.slide8Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide8Comment))) sComments.slide8Comment = clientComments.slide8Comment;
+        if (clientComments.customProjectSlides !== undefined && (isV2Client || (Array.isArray(clientComments.customProjectSlides) && clientComments.customProjectSlides.length > 0))) sComments.customProjectSlides = clientComments.customProjectSlides;
+        // [多端同步修复] 旧客户端仅在服务端尚无排序时允许初始化，之后仅 v2 客户端可变更，防止默认排序冲刷自定义排序
+        if (clientComments.slideOrder !== undefined && (isV2Client || !sComments.slideOrder)) sComments.slideOrder = clientComments.slideOrder;
 
         storage.month_configs[month].custom_comments = sComments;
         saveStorage(storage);
