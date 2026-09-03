@@ -109,6 +109,25 @@ const taierLogo = "/taier.png";
 const songLogo = "/song.png";
 const corporateLogo = "/group.png";
 
+type ReportLogoId = "jiumaojiu" | "taier" | "song" | "group";
+const REPORT_LOGO_DEFAULTS: Record<ReportLogoId, string> = {
+  jiumaojiu: jiumaojiuLogo,
+  taier: taierLogo,
+  song: songLogo,
+  group: corporateLogo
+};
+const REPORT_LOGO_META: Array<{
+  id: ReportLogoId;
+  name: string;
+  emoji: string;
+  fallbackClass: string;
+}> = [
+  { id: "jiumaojiu", name: "九毛九西北菜", emoji: "🐑", fallbackClass: "bg-rose-600 text-white" },
+  { id: "taier", name: "太二酸菜鱼", emoji: "🐟", fallbackClass: "bg-zinc-950 text-white border border-zinc-800" },
+  { id: "song", name: "怂火锅厂", emoji: "🔥", fallbackClass: "bg-orange-500 text-white" },
+  { id: "group", name: "九毛九集团总部", emoji: "💻", fallbackClass: "bg-amber-400 text-slate-900 border-2 border-rose-500" }
+];
+
 const createDefaultProjectSlide = (monthLabel: string, index: number): ProjectSlide => {
   const monthClean = monthLabel.replace("2026-", "");
   return {
@@ -188,6 +207,7 @@ interface CollaborativeInputProps {
   className?: string;
   style?: React.CSSProperties;
   isBullet?: boolean;
+  readOnly?: boolean;
 }
 
 const CollaborativeInput: React.FC<CollaborativeInputProps> = ({
@@ -199,7 +219,8 @@ const CollaborativeInput: React.FC<CollaborativeInputProps> = ({
   activeEditors,
   className,
   style,
-  isBullet = false
+  isBullet = false,
+  readOnly = false
 }) => {
   const elementRef = useRef<HTMLDivElement | HTMLSpanElement | null>(null);
   const isFocusedRef = useRef<boolean>(false);
@@ -222,7 +243,7 @@ const CollaborativeInput: React.FC<CollaborativeInputProps> = ({
 
   return (
     <div className="relative w-full">
-      {editor && (
+      {!readOnly && editor && (
         <div className="absolute -top-5.5 left-2 z-30 bg-rose-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-md animate-bounce flex items-center gap-1 select-none pointer-events-none">
           <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
           <span>{editor.username} 正在编辑</span>
@@ -230,22 +251,25 @@ const CollaborativeInput: React.FC<CollaborativeInputProps> = ({
       )}
       <Tag
         ref={elementRef as any}
-        contentEditable
+        contentEditable={!readOnly}
         suppressContentEditableWarning
         onFocus={() => {
+          if (readOnly) return;
           isFocusedRef.current = true;
           onFocus();
         }}
         onInput={(e) => {
+          if (readOnly) return;
           const currentText = isBullet ? e.currentTarget.innerText : e.currentTarget.innerHTML;
           onChange(currentText);
         }}
         onBlur={(e) => {
+          if (readOnly) return;
           isFocusedRef.current = false;
           const currentText = isBullet ? e.currentTarget.innerText : e.currentTarget.innerHTML;
           onBlur(currentText);
         }}
-        onPaste={isBullet ? undefined : (e) => {
+        onPaste={readOnly || isBullet ? undefined : (e) => {
           e.preventDefault();
           const text = e.clipboardData.getData("text/plain");
           document.execCommand("insertText", false, text);
@@ -260,38 +284,89 @@ const CollaborativeInput: React.FC<CollaborativeInputProps> = ({
   );
 };
 
-export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentUser, registerExportFn }) => {
+export const ReportPage: React.FC<ReportPageProps> = ({
+  metrics,
+  month,
+  currentUser,
+  registerExportFn
+}) => {
   const isPdf = useContext(PdfContext);
-  const [customLogos, setCustomLogos] = useState<Record<string, string>>({});
+  const snapshotMeta = metrics.snapshot_meta;
+  const snapshotLocked = !!snapshotMeta?.locked;
+  const [snapshotActionBusy, setSnapshotActionBusy] = useState(false);
+  const [snapshotActionError, setSnapshotActionError] = useState<string | null>(null);
+  const [reportLogos, setReportLogos] = useState<Partial<Record<ReportLogoId, string>>>({});
+  const [reportLogoBusy, setReportLogoBusy] = useState<ReportLogoId | null>(null);
+  const [reportLogoError, setReportLogoError] = useState<string | null>(null);
+
+  const authenticatedJsonFetch = (url: string, options: RequestInit = {}) => {
+    const token = localStorage.getItem("auth_token");
+    const headers = new Headers(options.headers || {});
+    headers.set("Content-Type", "application/json");
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    return fetch(url, { ...options, headers });
+  };
 
   useEffect(() => {
-    // 1. 先尝试快速从 localStorage 加载，保证秒开体验
-    try {
-      const saved = localStorage.getItem("custom_brand_logos");
-      if (saved) {
-        setCustomLogos(JSON.parse(saved));
-      }
-    } catch (e) {
-      console.error("Failed to parse custom brand logos in ReportPage:", e);
-    }
-
-    // 2. 异步从后端同步最新的全局自定义品牌 Logo，保持团队各成员浏览器显示一致
-    const fetchServerLogos = async () => {
+    if (!currentUser) return;
+    let cancelled = false;
+    const loadReportLogos = async () => {
       try {
-        const res = await fetch("/api/custom-logos");
-        if (res.ok) {
-          const data = await res.json();
-          if (data.customLogos) {
-            setCustomLogos(data.customLogos);
-            localStorage.setItem("custom_brand_logos", JSON.stringify(data.customLogos));
-          }
+        const res = await authenticatedJsonFetch(`/api/report-logos/${month}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "月报 Logo 加载失败");
+        if (!cancelled) {
+          setReportLogos(data.reportLogos || {});
+          setReportLogoError(null);
+          setFailedLogos({});
         }
-      } catch (err) {
-        console.error("Failed to fetch custom logos from server in ReportPage:", err);
+      } catch (e: any) {
+        if (!cancelled) setReportLogoError(e.message || "月报 Logo 加载失败");
       }
     };
-    fetchServerLogos();
-  }, []);
+    loadReportLogos();
+    return () => {
+      cancelled = true;
+    };
+  }, [month, currentUser, snapshotLocked]);
+
+  const saveReportLogo = async (brandId: ReportLogoId, base64: string) => {
+    if (snapshotLocked || reportLogoBusy) return;
+    setReportLogoBusy(brandId);
+    setReportLogoError(null);
+    try {
+      const res = await authenticatedJsonFetch(`/api/report-logos/${month}`, {
+        method: "POST",
+        body: JSON.stringify({ brandId, base64 })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "月报 Logo 保存失败");
+      setReportLogos(data.reportLogos || {});
+      setFailedLogos(prev => ({ ...prev, [brandId]: false }));
+    } catch (e: any) {
+      setReportLogoError(e.message || "月报 Logo 保存失败");
+    } finally {
+      setReportLogoBusy(null);
+    }
+  };
+
+  const handleReportLogoFile = (brandId: ReportLogoId, file?: File) => {
+    if (!file) return;
+    if (!/^image\/(png|jpeg|jpg|webp)$/i.test(file.type)) {
+      setReportLogoError("Logo 仅支持 PNG/JPG/JPEG/WEBP。");
+      return;
+    }
+    if (file.size > 2.5 * 1024 * 1024) {
+      setReportLogoError("Logo 文件不能超过 2.5MB。");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") saveReportLogo(brandId, reader.result);
+    };
+    reader.onerror = () => setReportLogoError("Logo 文件读取失败，请重试。");
+    reader.readAsDataURL(file);
+  };
 
   // Navigation mode state - default to false (全览模式 / Scroll mode) per user preference
   const [isPptMode, setIsPptMode] = useState<boolean>(false);
@@ -320,26 +395,9 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
   const [slide7Comment, setSlide7Comment] = useState<string>("");
   const [slide8Comment, setSlide8Comment] = useState<string>("");
 
-  // 动态重点项目专页清单状态（从 localStorage 恢复）
-  const [customProjectSlides, setCustomProjectSlides] = useState<ProjectSlide[]>(() => {
-    try {
-      const saved = localStorage.getItem(`${metrics.curr_month_label}_customProjectSlides`);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {}
-    return [];
-  });
-
-  // 动态 PPT 页面自定义排序清单状态
-  const [slideOrder, setSlideOrder] = useState<SlideOrderConfig[]>(() => {
-    try {
-      const saved = localStorage.getItem(`${metrics.curr_month_label}_slideOrder`);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        return reconcileSlideOrder(parsed, customProjectSlides);
-      }
-    } catch (e) {}
-    return getDefaultSlideOrder(customProjectSlides);
-  });
+  // 专项页与页序以服务器 custom_comments 为权威源；localStorage 仅保留写入备份，不再参与首次展示。
+  const [customProjectSlides, setCustomProjectSlides] = useState<ProjectSlide[]>([]);
+  const [slideOrder, setSlideOrder] = useState<SlideOrderConfig[]>(() => getDefaultSlideOrder([]));
 
   // 动态计算总页数（直接跟随 slideOrder 的元素数量）
   const totalSlides = slideOrder.length;
@@ -548,13 +606,13 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
   }, [editingField, month, currentUser]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser || snapshotLocked) return;
 
     // [多端同步修复] 切换账期时，先将上一个账期残留的脏数据补发一次防止丢失，再重置脏计数器
     if (syncSessionMonthRef.current && syncSessionMonthRef.current !== month) {
       const flushComments = collectDirtyComments();
       if (Object.keys(flushComments).length > 0) {
-        fetch("/api/collaboration/sync", {
+        authenticatedJsonFetch("/api/collaboration/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -593,7 +651,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
       payload.clientComments = clientComments;
 
       try {
-        const res = await fetch("/api/collaboration/sync", {
+        const res = await authenticatedJsonFetch("/api/collaboration/sync", {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
@@ -672,7 +730,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
 
       // 组件卸载时释放本人的编辑锁，并补发尚未同步的脏数据防止丢失
       const current = stateRefs.current;
-      fetch("/api/collaboration/sync", {
+      authenticatedJsonFetch("/api/collaboration/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -684,7 +742,89 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
         })
       }).catch(() => {});
     };
-  }, [month, currentUser]);
+  }, [month, currentUser, snapshotLocked]);
+
+  const handleFinalizeSnapshot = async () => {
+    if (snapshotActionBusy || snapshotLocked) return;
+    const confirmed = window.confirm(
+      `确定将 ${month} 当前页面显示内容锁定为“最终版”吗？\n\n锁定后，新电脑会读取这一份固定快照，RDS、钉钉等历史源后续变化不会再改变该账期。`
+    );
+    if (!confirmed) return;
+
+    setSnapshotActionBusy(true);
+    setSnapshotActionError(null);
+    try {
+      // 先把本机尚未被心跳确认的字段补发到服务器，再执行最终版锁定。
+      // 最终版接口以服务器协同数据为权威，避免较旧客户端覆盖其他主管刚保存的内容。
+      const pendingComments = collectDirtyComments();
+      if (Object.keys(pendingComments).length > 0) {
+        const syncRes = await authenticatedJsonFetch("/api/collaboration/sync", {
+          method: "POST",
+          body: JSON.stringify({
+            month,
+            editingField: null,
+            syncVersion: 2,
+            clientComments: pendingComments
+          })
+        });
+        const syncData = await syncRes.json();
+        if (!syncRes.ok) throw new Error(syncData.error || "锁定前同步最新批注失败");
+        for (const key of Object.keys(pendingComments)) {
+          ackedCounterRef.current[key] = dirtyCounterRef.current[key] || 0;
+        }
+      }
+
+      const comments = {
+        slide2Bullets: [...localEditsRef.current.slide2Bullets],
+        slide4Comment: localEditsRef.current.slide4Comment,
+        slide5Comment: localEditsRef.current.slide5Comment,
+        slide6Comment: localEditsRef.current.slide6Comment,
+        slide7Comment: localEditsRef.current.slide7Comment,
+        slide8Comment: localEditsRef.current.slide8Comment,
+        customProjectSlides: localEditsRef.current.customProjectSlides,
+        slideOrder: localEditsRef.current.slideOrder
+      };
+      const metricsForSnapshot: any = {
+        ...metrics,
+        custom_comments: comments
+      };
+      delete metricsForSnapshot.snapshot_meta;
+
+      const res = await authenticatedJsonFetch(`/api/report-snapshot/${month}/finalize`, {
+        method: "POST",
+        body: JSON.stringify({ metrics: metricsForSnapshot, comments })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "最终版锁定失败");
+      window.alert(`已锁定 ${month} 最终版。快照编号：${data.snapshot?.snapshotId || "已生成"}`);
+      window.location.reload();
+    } catch (e: any) {
+      setSnapshotActionError(e.message || "最终版锁定失败");
+    } finally {
+      setSnapshotActionBusy(false);
+    }
+  };
+
+  const handleUnlockSnapshot = async () => {
+    if (snapshotActionBusy || !snapshotLocked || currentUser?.role !== "管理员") return;
+    const confirmed = window.confirm(
+      `确定解除 ${month} 的最终版锁定吗？解除后仍会保留当前服务器共享工作版；修改核心填报字段后需要重新生成工作版，再次审核并锁定最终版。`
+    );
+    if (!confirmed) return;
+
+    setSnapshotActionBusy(true);
+    setSnapshotActionError(null);
+    try {
+      const res = await authenticatedJsonFetch(`/api/report-snapshot/${month}/unlock`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "解除最终版锁定失败");
+      window.location.reload();
+    } catch (e: any) {
+      setSnapshotActionError(e.message || "解除最终版锁定失败");
+    } finally {
+      setSnapshotActionBusy(false);
+    }
+  };
 
   // PDF Exporting States
   const [isExporting, setIsExporting] = useState<boolean>(false);
@@ -848,66 +988,29 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     return stripped.length > 0;
   };
 
-  // Load from localStorage, inherited prev month, or defaults on mount and whenever current month label changes
+  // 月报正文以服务器 custom_comments 为唯一共享源；服务器无内容时使用确定性的系统默认文案。
+  // 本机 localStorage 仍作为编辑防丢备份写入，但不再参与正式页面读取，避免多台电脑各自拼出不同版本。
   useEffect(() => {
     const monthLabel = metrics.curr_month_label;
     const defaults = getDefaultValues(monthLabel, metrics);
-    const prevLabel = getPrevMonthLabel(monthLabel);
 
     const serverComments = (metrics as any).custom_comments;
 
-    // Helper: 智能解析或继承评语，绝对不返回空字符串
+    // Helper: 服务器有内容则使用服务器值，否则回退当前指标对应的确定性默认文案。
     const resolveCommentText = (
       key: "slide4Comment" | "slide5Comment" | "slide6Comment" | "slide7Comment" | "slide8Comment",
       defaultValue: string
     ): string => {
-      // 1. 如果服务器侧有当前月份的非空自定义内容
       if (serverComments && isNonEmptyText(serverComments[key])) {
         return cleanHtml(serverComments[key]);
       }
-
-      // 2. 如果本地 localStorage 有当前月份的非空保存内容
-      const currentLocal = localStorage.getItem(`${monthLabel}_${key}`);
-      if (isNonEmptyText(currentLocal)) {
-        return cleanHtml(currentLocal!);
-      }
-
-      // 3. 自动继承【上一个月 (prevLabel)】的数据或保存的评论内容！
-      if (prevLabel) {
-        const prevLocal = localStorage.getItem(`${prevLabel}_${key}`);
-        if (isNonEmptyText(prevLocal)) {
-          return cleanHtml(prevLocal!);
-        }
-      }
-
-      // 4. 回退使用系统针对当前月份数据计算出的默认模版
       return defaultValue;
     };
 
-    // Helper: 智能解析或继承 Bullet Lists
+    // Helper: 核心结论同样只读服务器共享值或当前指标默认值。
     const resolveBulletsText = (): string[] => {
       if (serverComments && Array.isArray(serverComments.slide2Bullets) && serverComments.slide2Bullets.some(b => isNonEmptyText(b))) {
         return serverComments.slide2Bullets.filter(b => isNonEmptyText(b));
-      }
-      const currentLocal = localStorage.getItem(`${monthLabel}_slide2Bullets`);
-      if (currentLocal) {
-        try {
-          const parsed = JSON.parse(currentLocal);
-          if (Array.isArray(parsed) && parsed.some(b => isNonEmptyText(b))) {
-            return parsed.filter(b => isNonEmptyText(b));
-          }
-        } catch (e) {}
-      }
-      if (prevLabel) {
-        const prevLocal = localStorage.getItem(`${prevLabel}_slide2Bullets`);
-        if (prevLocal) {
-          try {
-            const parsedPrev = JSON.parse(prevLocal);
-            if (Array.isArray(parsedPrev) && parsedPrev.some(b => isNonEmptyText(b))) {
-              return parsedPrev.filter(b => isNonEmptyText(b));
-            }
-          } catch (e) {}
-        }
       }
       return defaults.bullets;
     };
@@ -919,6 +1022,21 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
       setSlide6Comment(resolveCommentText("slide6Comment", defaults.s6));
       setSlide7Comment(resolveCommentText("slide7Comment", defaults.s7));
       setSlide8Comment(resolveCommentText("slide8Comment", defaults.s8));
+      if (serverComments && Array.isArray(serverComments.customProjectSlides)) {
+        const serverSlides = serverComments.customProjectSlides as ProjectSlide[];
+        setCustomProjectSlides(serverSlides);
+        if (Array.isArray(serverComments.slideOrder)) {
+          setSlideOrder(reconcileSlideOrder(serverComments.slideOrder, serverSlides));
+        } else {
+          setSlideOrder(getDefaultSlideOrder(serverSlides));
+        }
+      } else if (serverComments && Array.isArray(serverComments.slideOrder)) {
+        setCustomProjectSlides([]);
+        setSlideOrder(reconcileSlideOrder(serverComments.slideOrder, []));
+      } else {
+        setCustomProjectSlides([]);
+        setSlideOrder(getDefaultSlideOrder([]));
+      }
     } catch (e) {
       console.error("Failed to load or resolve comments", e);
       setSlide2Bullets(defaults.bullets);
@@ -933,7 +1051,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
     metrics.current_month_tickets_total,
     metrics.current_qiyu_raw?.total,
     metrics.current_renwood_count,
-    metrics.current_new_shops
+    metrics.current_new_shops,
+    metrics.custom_comments
   ]);
 
   // Persisting state setter helpers
@@ -1079,6 +1198,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
           totalPages={totalSlides}
           onUpdate={(updated) => handleUpdateProjectSlide(pSlide.id, updated)}
           onDelete={() => handleDeleteProjectSlide(pSlide.id)}
+          readOnly={snapshotLocked}
         />
       );
     }
@@ -1138,74 +1258,71 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
 
                 {/* 4 Brand Logos Grid */}
                 <div className="grid grid-cols-4 gap-8 mb-6">
-                <div className="border border-slate-150 rounded-2xl p-3 h-[145px] flex items-center justify-center bg-slate-50/50 hover:bg-slate-50 hover:border-indigo-200 transition-all shadow-xs overflow-hidden">
-                  {!failedLogos["jiumaojiu"] ? (
-                    <img
-                      src={customLogos["jiumaojiu"] || jiumaojiuLogo}
-                      alt="九毛九"
-                      onError={() => setFailedLogos(prev => ({ ...prev, jiumaojiu: true }))}
-                      className="max-h-[95%] max-w-[95%] object-contain"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center w-full h-full bg-rose-600 rounded-xl text-white font-bold p-3 shadow-sm select-none">
-                      <span className="text-3xl mb-1">🐑</span>
-                      <span className="text-base tracking-wider font-sans font-semibold">九毛九西北菜</span>
-                    </div>
-                  )}
-                </div>
+                  {REPORT_LOGO_META.map((brand) => {
+                    const logoSrc = reportLogos[brand.id] || REPORT_LOGO_DEFAULTS[brand.id];
+                    return (
+                      <label
+                        key={brand.id}
+                        className={`group relative border border-slate-150 rounded-2xl p-3 h-[145px] flex items-center justify-center bg-slate-50/50 transition-all shadow-xs overflow-hidden ${
+                          !isPdf && !snapshotLocked ? "hover:bg-slate-50 hover:border-indigo-300 cursor-pointer" : ""
+                        }`}
+                        title={!isPdf && !snapshotLocked ? `点击替换 ${brand.name} Logo` : brand.name}
+                      >
+                        {!failedLogos[brand.id] ? (
+                          <img
+                            src={logoSrc}
+                            alt={brand.name}
+                            onError={() => setFailedLogos(prev => ({ ...prev, [brand.id]: true }))}
+                            className="max-h-[95%] max-w-[95%] object-contain"
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : (
+                          <div className={`flex flex-col items-center justify-center w-full h-full rounded-xl font-bold p-3 shadow-sm select-none ${brand.fallbackClass}`}>
+                            <span className="text-3xl mb-1">{brand.emoji}</span>
+                            <span className="text-base tracking-wider font-sans font-semibold">{brand.name}</span>
+                          </div>
+                        )}
 
-                <div className="border border-slate-150 rounded-2xl p-3 h-[145px] flex items-center justify-center bg-slate-50/50 hover:bg-slate-50 hover:border-indigo-200 transition-all shadow-xs overflow-hidden">
-                  {!failedLogos["taier"] ? (
-                    <img
-                      src={customLogos["taier"] || taierLogo}
-                      alt="太二"
-                      onError={() => setFailedLogos(prev => ({ ...prev, taier: true }))}
-                      className="max-h-[95%] max-w-[95%] object-contain"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center w-full h-full bg-zinc-950 rounded-xl text-white font-bold p-3 shadow-sm border border-zinc-800 select-none">
-                      <span className="text-3xl mb-1">🐟</span>
-                      <span className="text-base tracking-wider font-sans font-semibold">太二酸菜鱼</span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="border border-slate-150 rounded-2xl p-3 h-[145px] flex items-center justify-center bg-slate-50/50 hover:bg-slate-50 hover:border-indigo-200 transition-all shadow-xs overflow-hidden">
-                  {!failedLogos["song"] ? (
-                    <img
-                      src={customLogos["song"] || songLogo}
-                      alt="怂"
-                      onError={() => setFailedLogos(prev => ({ ...prev, song: true }))}
-                      className="max-h-[95%] max-w-[95%] object-contain"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center w-full h-full bg-orange-500 rounded-xl text-white font-bold p-3 shadow-sm select-none">
-                      <span className="text-3xl mb-1">🔥</span>
-                      <span className="text-base tracking-wider font-sans font-semibold">怂火锅厂</span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="border border-slate-150 rounded-2xl p-3 h-[145px] flex items-center justify-center bg-slate-50/50 hover:bg-slate-50 hover:border-indigo-200 transition-all shadow-xs overflow-hidden">
-                  {!failedLogos["group"] ? (
-                    <img
-                      src={customLogos["group"] || corporateLogo}
-                      alt="Corporate9"
-                      onError={() => setFailedLogos(prev => ({ ...prev, group: true }))}
-                      className="max-h-[95%] max-w-[95%] object-contain"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center w-full h-full bg-amber-400 rounded-xl text-slate-900 font-bold p-3 shadow-sm border-2 border-rose-500 select-none">
-                      <span className="text-3xl mb-1">💻</span>
-                      <span className="text-base tracking-wider font-sans font-bold">九毛九集团总部</span>
-                    </div>
-                  )}
-                </div>
+                        {!isPdf && !snapshotLocked && (
+                          <>
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp"
+                              className="hidden"
+                              disabled={!!reportLogoBusy}
+                              onChange={(e) => {
+                                handleReportLogoFile(brand.id, e.target.files?.[0]);
+                                e.currentTarget.value = "";
+                              }}
+                            />
+                            <div className="absolute inset-x-3 bottom-3 rounded-lg bg-slate-950/70 text-white text-[10px] font-semibold py-1 text-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                              {reportLogoBusy === brand.id ? "正在上传..." : "点击替换 Logo"}
+                            </div>
+                            {reportLogos[brand.id] && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  saveReportLogo(brand.id, "");
+                                }}
+                                className="absolute top-2 right-2 px-2 py-1 rounded-lg bg-white/95 border border-slate-200 text-[9px] font-bold text-slate-600 hover:text-rose-600 hover:border-rose-200 shadow-xs"
+                              >
+                                恢复默认
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </label>
+                    );
+                  })}
               </div>
+
+              {!isPdf && reportLogoError && (
+                <div className="-mt-3 mb-4 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">
+                  {reportLogoError}
+                </div>
+              )}
 
               {/* Core Conclusions bullet points */}
               <div className="space-y-4 pl-2 mb-8">
@@ -1242,11 +1359,12 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                             }}
                             fieldKey={`slide2Bullet_${idx}`}
                             activeEditors={activeEditors}
+                            readOnly={snapshotLocked}
                             className="hover:bg-amber-50/50 px-2 py-0.5 rounded transition duration-150 cursor-text outline-none focus:bg-amber-50 focus:ring-1 focus:ring-amber-300 w-full block"
                             isBullet={true}
                           />
                         </div>
-                        {!isPdf && (
+                        {!isPdf && !snapshotLocked && (
                           <button
                             type="button"
                             onClick={() => {
@@ -1446,6 +1564,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                   }}
                   fieldKey="slide4Comment"
                   activeEditors={activeEditors}
+                  readOnly={snapshotLocked}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1612,6 +1731,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                   }}
                   fieldKey="slide5Comment"
                   activeEditors={activeEditors}
+                  readOnly={snapshotLocked}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1720,6 +1840,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                   }}
                   fieldKey="slide6Comment"
                   activeEditors={activeEditors}
+                  readOnly={snapshotLocked}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1831,6 +1952,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                   }}
                   fieldKey="slide7Comment"
                   activeEditors={activeEditors}
+                  readOnly={snapshotLocked}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1902,6 +2024,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                   }}
                   fieldKey="slide8Comment"
                   activeEditors={activeEditors}
+                  readOnly={snapshotLocked}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1969,6 +2092,83 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
       
       {/* 📺 SCREEN DISPLAY ONLY */}
       <div className="print:hidden space-y-6">
+        <div className={`border p-4 rounded-2xl shadow-xs ${
+          snapshotLocked
+            ? "bg-emerald-50/70 border-emerald-200"
+            : snapshotMeta?.workingExists
+              ? "bg-indigo-50/70 border-indigo-200"
+              : "bg-amber-50/70 border-amber-200"
+        }`}>
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div>
+              <div className={`text-xs font-bold ${
+                snapshotLocked ? "text-emerald-800" : snapshotMeta?.workingExists ? "text-indigo-800" : "text-amber-800"
+              }`}>
+                {snapshotLocked
+                  ? "🔒 当前账期已锁定为最终版"
+                  : snapshotMeta?.workingExists
+                    ? `🧾 当前显示服务器共享工作版 v${snapshotMeta.workingVersion || 1}`
+                    : "⚠️ 当前账期尚未生成共享工作版"}
+              </div>
+              <div className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                {snapshotLocked
+                  ? `快照 ${snapshotMeta?.snapshotId || "已建立"} · ${snapshotMeta?.finalizedBy || "未知用户"} · ${snapshotMeta?.finalizedAt ? new Date(snapshotMeta.finalizedAt).toLocaleString() : "时间未记录"}。新电脑读取同一固定快照。`
+                  : snapshotMeta?.workingExists
+                    ? `生成者 ${snapshotMeta.workingGeneratedBy || "未知用户"} · ${snapshotMeta.workingGeneratedAt ? new Date(snapshotMeta.workingGeneratedAt).toLocaleString() : "时间未记录"}。所有电脑打开该账期都会读取这份服务器工作版。`
+                    : "首次点击“一键生成 IT 运维月报”后，服务器会建立共享工作版；此后所有电脑读取同一份预览。"}
+              </div>
+              {snapshotMeta?.workingExists && snapshotMeta?.workingStale && !snapshotLocked && (
+                <div className="mt-2 text-[11px] text-amber-700 font-semibold bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                  填报字段已更新，当前仍固定显示上一次共享工作版。请由任一主管重新点击“一键生成”，更新所有人的共享预览。
+                  {snapshotMeta.workingStaleReason ? ` 原因：${snapshotMeta.workingStaleReason}` : ""}
+                </div>
+              )}
+              {snapshotMeta?.driftDetected && (
+                <div className="mt-2 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-[11px] text-rose-700 leading-relaxed">
+                  <div className="font-bold">检测到历史月报数据漂移</div>
+                  <div className="mt-0.5">
+                    已保存结论中的叫修数据为 {snapshotMeta.driftEvidence?.expected?.currentTickets ?? "-"} 单 / {snapshotMeta.driftEvidence?.expected?.currentAvgDays ?? "-"} 天，当前动态数据源返回 {snapshotMeta.driftEvidence?.actual?.currentTickets ?? "-"} 单 / {snapshotMeta.driftEvidence?.actual?.currentAvgDays ?? "-"} 天。请以已审核完成版本为依据核对后再锁定最终版。
+                  </div>
+                </div>
+              )}
+              {snapshotMeta?.stale && (
+                <div className="text-[11px] text-rose-600 font-semibold mt-1">
+                  当前快照已标记待重新确认：{snapshotMeta.staleReason || "账期内容发生修改"}
+                </div>
+              )}
+              {snapshotActionError && (
+                <div className="text-[11px] text-rose-600 font-semibold mt-1">{snapshotActionError}</div>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-none">
+              {!snapshotLocked && (
+                <button
+                  type="button"
+                  disabled={snapshotActionBusy || !!snapshotMeta?.workingStale}
+                  onClick={handleFinalizeSnapshot}
+                  className="px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white shadow-xs cursor-pointer"
+                >
+                  {snapshotActionBusy
+                    ? "正在锁定..."
+                    : snapshotMeta?.workingStale
+                      ? "请先重新生成工作版"
+                      : "锁定当前显示为最终版"}
+                </button>
+              )}
+              {snapshotLocked && currentUser?.role === "管理员" && (
+                <button
+                  type="button"
+                  disabled={snapshotActionBusy}
+                  onClick={handleUnlockSnapshot}
+                  className="px-3.5 py-2 rounded-xl text-xs font-bold bg-white hover:bg-rose-50 disabled:opacity-50 text-rose-600 border border-rose-200 shadow-xs cursor-pointer"
+                >
+                  {snapshotActionBusy ? "处理中..." : "解除锁定并修订"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
         {/* 👑 Mode Switcher and Slide Control Center */}
         <div className="bg-slate-50 border border-slate-200/60 p-4 rounded-2xl flex flex-col md:flex-row justify-between items-center gap-4 shadow-xs">
           <div className="flex items-center gap-3">
@@ -2014,13 +2214,15 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
               </button>
             </div>
 
-            <button
-              onClick={handleAddProjectSlide}
-              className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs flex items-center gap-1.5 cursor-pointer hover:shadow-md active:scale-95"
-            >
-              <span className="text-sm font-black text-indigo-200">+</span>
-              <span>新增重点项目专页</span>
-            </button>
+            {!snapshotLocked && (
+              <button
+                onClick={handleAddProjectSlide}
+                className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs flex items-center gap-1.5 cursor-pointer hover:shadow-md active:scale-95"
+              >
+                <span className="text-sm font-black text-indigo-200">+</span>
+                <span>新增重点项目专页</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -2038,13 +2240,15 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
               <span className="text-[11px] text-slate-400 font-mono hidden md:inline">
                 例如：把 09 拖到第二页下面，序号与右上角 PAGE 即自动变 03
               </span>
-              <button
-                type="button"
-                onClick={handleResetSlideOrder}
-                className="text-[11px] text-slate-500 hover:text-indigo-600 font-medium px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-white transition cursor-pointer shadow-3xs"
-              >
-                恢复默认顺序
-              </button>
+              {!snapshotLocked && (
+                <button
+                  type="button"
+                  onClick={handleResetSlideOrder}
+                  className="text-[11px] text-slate-500 hover:text-indigo-600 font-medium px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-white transition cursor-pointer shadow-3xs"
+                >
+                  恢复默认顺序
+                </button>
+              )}
             </div>
           </div>
 
@@ -2057,10 +2261,10 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
               return (
                 <div
                   key={item.id}
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, idx)}
-                  onDragOver={handleDragOver}
-                  onDrop={(e) => handleDrop(e, idx)}
+                  draggable={!snapshotLocked}
+                  onDragStart={snapshotLocked ? undefined : (e) => handleDragStart(e, idx)}
+                  onDragOver={snapshotLocked ? undefined : handleDragOver}
+                  onDrop={snapshotLocked ? undefined : (e) => handleDrop(e, idx)}
                   onClick={() => setCurrentSlideIndex(idx)}
                   className={`flex-none flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-sans transition-all select-none cursor-grab active:cursor-grabbing ${
                     isDragging
@@ -2081,7 +2285,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                   </span>
 
                   {/* Micro step arrows for accessibility & precise move */}
-                  <div className="flex items-center gap-0.5 ml-1 opacity-70 hover:opacity-100">
+                  {!snapshotLocked && <div className="flex items-center gap-0.5 ml-1 opacity-70 hover:opacity-100">
                     <button
                       type="button"
                       disabled={idx === 0}
@@ -2110,7 +2314,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({ metrics, month, currentU
                     >
                       ▶
                     </button>
-                  </div>
+                  </div>}
                 </div>
               );
             })}

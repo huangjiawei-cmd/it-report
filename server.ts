@@ -501,6 +501,105 @@ async function startServer() {
     return result;
   };
 
+  const APP_RELEASE = "1.5.0-report-consistency";
+  const REPORT_LOGO_IDS = new Set(["jiumaojiu", "taier", "song", "group"]);
+  const MAX_REPORT_LOGO_DATA_URL_LENGTH = 3_600_000;
+
+  const cloneJson = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+
+  const getSnapshotMeta = (config: any) => {
+    const snapshot = config?.final_snapshot;
+    const working = config?.last_generated_snapshot;
+    return {
+      exists: !!snapshot?.metrics,
+      locked: !!snapshot?.metrics && snapshot.locked !== false,
+      stale: !!config?._snapshot_stale,
+      staleAt: config?._snapshot_stale_at || null,
+      staleReason: config?._snapshot_stale_reason || null,
+      finalizedAt: snapshot?.finalized_at || null,
+      finalizedBy: snapshot?.finalized_by || null,
+      snapshotId: snapshot?.snapshot_id || null,
+      version: Number(snapshot?.version || 0),
+      workingExists: !!working?.metrics,
+      workingVersion: Number(working?.version || 0),
+      workingGeneratedAt: working?.generated_at || null,
+      workingGeneratedBy: working?.generated_by || null,
+      workingStale: !!config?._working_snapshot_stale,
+      workingStaleAt: config?._working_snapshot_stale_at || null,
+      workingStaleReason: config?._working_snapshot_stale_reason || null
+    };
+  };
+
+  const markSnapshotStale = (config: any, reason: string, username?: string) => {
+    if (!config?.final_snapshot?.metrics) return;
+    config._snapshot_stale = true;
+    config._snapshot_stale_at = new Date().toISOString();
+    config._snapshot_stale_reason = reason;
+    config._snapshot_stale_by = username || "system";
+  };
+
+  const markWorkingSnapshotStale = (config: any, reason: string, username?: string) => {
+    if (!config?.last_generated_snapshot?.metrics) return;
+    config._working_snapshot_stale = true;
+    config._working_snapshot_stale_at = new Date().toISOString();
+    config._working_snapshot_stale_reason = reason;
+    config._working_snapshot_stale_by = username || "system";
+  };
+
+  const clearWorkingSnapshotStale = (config: any) => {
+    config._working_snapshot_stale = false;
+    config._working_snapshot_stale_at = null;
+    config._working_snapshot_stale_reason = null;
+    config._working_snapshot_stale_by = null;
+  };
+
+  const syncWorkingSnapshotContent = (config: any) => {
+    const working = config?.last_generated_snapshot;
+    if (!working?.metrics) return;
+    const comments = cloneJson(config.custom_comments || {});
+    const reportLogos = cloneJson(config.report_logos || {});
+    working.comments = comments;
+    working.report_logos = reportLogos;
+    working.metrics.custom_comments = comments;
+  };
+
+  const isValidReportLogoDataUrl = (value: string) => {
+    if (!value || value.length > MAX_REPORT_LOGO_DATA_URL_LENGTH) return false;
+    return /^data:image\/(?:png|jpe?g|webp);base64,[A-Za-z0-9+/=\r\n]+$/i.test(value);
+  };
+
+  const buildSnapshotId = (month: string, metrics: any, comments: any, reportLogos: any, version: number) => {
+    const payload = JSON.stringify({ month, metrics, comments, reportLogos, version });
+    return crypto.createHash("sha256").update(payload).digest("hex").slice(0, 16);
+  };
+
+  const detectHistoricalDrift = (config: any, metrics: any) => {
+    const bullets = config?.custom_comments?.slide2Bullets;
+    if (!Array.isArray(bullets)) return { detected: false, evidence: null };
+    const ticketBullet = bullets.find((item: any) => typeof item === "string" && item.includes("叫修工单共计"));
+    if (!ticketBullet) return { detected: false, evidence: null };
+    const normalized = ticketBullet.replace(/&nbsp;/g, " ").replace(/\u00a0/g, " ");
+    const match = normalized.match(/叫修工单共计\s*(\d+)\s*单.*?平均完结时长\s*([\d.]+)\s*天.*?较上月\s*([\d.]+)\s*天/);
+    if (!match) return { detected: false, evidence: null };
+    const expected = {
+      currentTickets: Number(match[1]),
+      currentAvgDays: Number(match[2]),
+      compareAvgDays: Number(match[3])
+    };
+    const actual = {
+      currentTickets: Number(metrics?.current_month_tickets_total || 0),
+      currentAvgDays: Number(metrics?.current_month_avg_days || 0),
+      compareAvgDays: Number(metrics?.compare_month_avg_days || 0)
+    };
+    const detected = expected.currentTickets !== actual.currentTickets ||
+      Math.abs(expected.currentAvgDays - actual.currentAvgDays) > 0.001 ||
+      Math.abs(expected.compareAvgDays - actual.compareAvgDays) > 0.001;
+    return {
+      detected,
+      evidence: detected ? { expected, actual, source: "saved_overview_ticket_summary" } : null
+    };
+  };
+
   // 使用内存存储配置 multer 插件，确保大文件流畅上传
   const upload = multer({ storage: multer.memoryStorage() });
 
@@ -803,7 +902,8 @@ async function startServer() {
 
   // 健康检测接口
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ status: "ok", release: APP_RELEASE });
   });
 
   // ==========================================
@@ -974,7 +1074,9 @@ async function startServer() {
         config: pickSharedMonthConfig(monthConfig),
         revision: Number(monthConfig?._revision || 0),
         updatedAt: monthConfig?._updated_at || null,
-        updatedBy: monthConfig?._updated_by || null
+        updatedBy: monthConfig?._updated_by || null,
+        snapshot: getSnapshotMeta(monthConfig),
+        release: APP_RELEASE
       });
     } catch (e: any) {
       console.error("加载共享账期配置失败:", e);
@@ -986,6 +1088,7 @@ async function startServer() {
     try {
       const { month } = req.params;
       const patch = req.body?.patch;
+      const baseRevision = Number(req.body?.baseRevision);
       if (!/^\d{4}-\d{2}$/.test(month)) {
         return res.status(400).json({ error: "账期格式非法" });
       }
@@ -1005,6 +1108,23 @@ async function startServer() {
       const storage = loadStorage();
       if (!storage.month_configs) storage.month_configs = {};
       const currentConfig = storage.month_configs[month] || {};
+      const currentRevision = Number(currentConfig._revision || 0);
+      if (!Number.isFinite(baseRevision) || baseRevision !== currentRevision) {
+        return res.status(409).json({
+          error: "当前账期已被其他用户更新，请基于服务器最新版本继续编辑。",
+          config: pickSharedMonthConfig(currentConfig),
+          revision: currentRevision,
+          updatedAt: currentConfig._updated_at || null,
+          updatedBy: currentConfig._updated_by || null,
+          snapshot: getSnapshotMeta(currentConfig)
+        });
+      }
+      if (getSnapshotMeta(currentConfig).locked) {
+        return res.status(423).json({
+          error: "该账期已锁定为最终版，请先由管理员解除锁定后再修改核心填报数据。",
+          snapshot: getSnapshotMeta(currentConfig)
+        });
+      }
       const nextRevision = Number(currentConfig._revision || 0) + 1;
       const nextConfig = {
         ...currentConfig,
@@ -1013,6 +1133,8 @@ async function startServer() {
         _updated_at: new Date().toISOString(),
         _updated_by: req.user?.username || "unknown"
       };
+      markSnapshotStale(nextConfig, "核心填报数据已发生修改", req.user?.username);
+      markWorkingSnapshotStale(nextConfig, "核心填报数据已发生修改，请重新生成共享工作版", req.user?.username);
       storage.month_configs[month] = nextConfig;
       saveStorage(storage);
 
@@ -1021,11 +1143,244 @@ async function startServer() {
         config: pickSharedMonthConfig(nextConfig),
         revision: nextRevision,
         updatedAt: nextConfig._updated_at,
-        updatedBy: nextConfig._updated_by
+        updatedBy: nextConfig._updated_by,
+        snapshot: getSnapshotMeta(nextConfig)
       });
     } catch (e: any) {
       console.error("保存共享账期配置失败:", e);
       return res.status(500).json({ error: "保存共享账期配置失败" });
+    }
+  });
+
+  // 月报最终版快照：完成月报后锁定完整 ReportMetrics + 文本/专项页，历史账期不再受外部数据源回写影响。
+  app.post("/api/report-snapshot/:month/finalize", authenticateMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      const incomingMetrics = req.body?.metrics;
+      const incomingComments = req.body?.comments;
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      if (!incomingMetrics || typeof incomingMetrics !== "object" || Array.isArray(incomingMetrics)) {
+        return res.status(400).json({ error: "缺少可锁定的月报指标数据" });
+      }
+      if (
+        incomingMetrics.current_month_tickets_total === undefined ||
+        incomingMetrics.current_qiyu_raw === undefined ||
+        incomingMetrics.curr_boh_data === undefined
+      ) {
+        return res.status(400).json({ error: "月报指标不完整，无法锁定最终版" });
+      }
+
+      const storage = loadStorage();
+      if (!storage.month_configs) storage.month_configs = {};
+      const config = storage.month_configs[month] || {};
+      const existingMeta = getSnapshotMeta(config);
+      if (existingMeta.locked) {
+        return res.status(409).json({
+          error: "该账期已经锁定为最终版。如需修订，请先由管理员解除最终版锁定。",
+          snapshot: existingMeta
+        });
+      }
+      if (config.last_generated_snapshot?.metrics && config._working_snapshot_stale) {
+        return res.status(409).json({
+          error: "当前共享工作版已落后于最新填报字段，请先重新点击“一键生成 IT 运维月报”，确认新工作版后再锁定最终版。",
+          snapshot: existingMeta
+        });
+      }
+
+      const fallbackComments = incomingComments && typeof incomingComments === "object"
+        ? cloneJson(incomingComments)
+        : cloneJson(incomingMetrics.custom_comments || {});
+      // 服务器协同数据为最终权威；客户端内容只补充服务器尚未出现的字段，
+      // 避免某台较旧页面在锁定时把其他主管刚保存的批注/专项页覆盖掉。
+      const comments = {
+        ...fallbackComments,
+        ...cloneJson(config.custom_comments || {})
+      };
+      const metrics = cloneJson(incomingMetrics);
+      delete metrics.snapshot_meta;
+      metrics.custom_comments = comments;
+      const reportLogos = cloneJson(config.report_logos || {});
+
+      const nextVersion = Number(config.final_snapshot?.version || 0) + 1;
+      const snapshotId = buildSnapshotId(month, metrics, comments, reportLogos, nextVersion);
+      config.custom_comments = comments;
+      const workingVersion = Number(config.last_generated_snapshot?.version || 0) + 1;
+      config.last_generated_snapshot = {
+        version: workingVersion,
+        generated_at: new Date().toISOString(),
+        generated_by: req.user?.username || "unknown",
+        release: APP_RELEASE,
+        source: "finalize_capture",
+        metrics: cloneJson(metrics),
+        comments: cloneJson(comments),
+        report_logos: cloneJson(reportLogos)
+      };
+      clearWorkingSnapshotStale(config);
+      config.final_snapshot = {
+        version: nextVersion,
+        locked: true,
+        snapshot_id: snapshotId,
+        finalized_at: new Date().toISOString(),
+        finalized_by: req.user?.username || "unknown",
+        release: APP_RELEASE,
+        report_logos: reportLogos,
+        metrics
+      };
+      config._snapshot_stale = false;
+      config._snapshot_stale_at = null;
+      config._snapshot_stale_reason = null;
+      config._snapshot_stale_by = null;
+      config._revision = Number(config._revision || 0) + 1;
+      config._updated_at = new Date().toISOString();
+      config._updated_by = req.user?.username || "unknown";
+      storage.month_configs[month] = config;
+      saveStorage(storage);
+
+      return res.json({
+        success: true,
+        snapshot: getSnapshotMeta(config)
+      });
+    } catch (e: any) {
+      console.error("锁定月报最终版失败:", e);
+      return res.status(500).json({ error: e.message || "锁定月报最终版失败" });
+    }
+  });
+
+  app.post("/api/report-snapshot/:month/unlock", authenticateMiddleware, adminOnlyMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      const storage = loadStorage();
+      const config = storage.month_configs?.[month];
+      if (!config?.final_snapshot?.metrics) {
+        return res.status(404).json({ error: "该账期没有最终版快照" });
+      }
+      config.final_snapshot.locked = false;
+      markSnapshotStale(config, "管理员已解除最终版锁定，等待重新生成并确认", req.user?.username);
+      markWorkingSnapshotStale(config, "最终版已解除锁定，请重新生成共享工作版后再继续确认", req.user?.username);
+      config._revision = Number(config._revision || 0) + 1;
+      config._updated_at = new Date().toISOString();
+      config._updated_by = req.user?.username || "unknown";
+      saveStorage(storage);
+      return res.json({ success: true, snapshot: getSnapshotMeta(config) });
+    } catch (e: any) {
+      console.error("解除月报最终版锁定失败:", e);
+      return res.status(500).json({ error: e.message || "解除月报最终版锁定失败" });
+    }
+  });
+
+  app.get("/api/admin/month-integrity/:month", authenticateMiddleware, adminOnlyMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      const storage = loadStorage();
+      const config = storage.month_configs?.[month] || null;
+      const stat = fs.existsSync(STORAGE_FILE) ? fs.statSync(STORAGE_FILE) : null;
+      const storageHash = fs.existsSync(STORAGE_FILE)
+        ? crypto.createHash("sha256").update(fs.readFileSync(STORAGE_FILE)).digest("hex").slice(0, 16)
+        : null;
+      const comments = config?.custom_comments || {};
+      return res.json({
+        release: APP_RELEASE,
+        month,
+        storage: {
+          path: STORAGE_FILE,
+          exists: !!stat,
+          size: stat?.size || 0,
+          modifiedAt: stat?.mtime?.toISOString?.() || null,
+          fingerprint: storageHash
+        },
+        monthConfig: {
+          exists: !!config,
+          revision: Number(config?._revision || 0),
+          updatedAt: config?._updated_at || null,
+          updatedBy: config?._updated_by || null,
+          sharedFields: Object.keys(pickSharedMonthConfig(config)),
+          commentFields: Object.keys(comments),
+          qiyuCacheExists: !!storage.qiyu_cache?.[month]
+        },
+        snapshot: getSnapshotMeta(config)
+      });
+    } catch (e: any) {
+      console.error("账期一致性诊断失败:", e);
+      return res.status(500).json({ error: e.message || "账期一致性诊断失败" });
+    }
+  });
+
+  // 月报第 2 页四个品牌 Logo：按账期保存，任何已登录用户都可修改；最终版锁定后随快照冻结。
+  app.get("/api/report-logos/:month", authenticateMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      const storage = loadStorage();
+      const config = storage.month_configs?.[month] || {};
+      const snapshotMeta = getSnapshotMeta(config);
+      const reportLogos = snapshotMeta.locked
+        ? (config.final_snapshot?.report_logos || config.report_logos || {})
+        : (config.report_logos || {});
+      return res.json({
+        reportLogos,
+        snapshot: snapshotMeta,
+        release: APP_RELEASE
+      });
+    } catch (e: any) {
+      console.error("加载月报品牌 Logo 失败:", e);
+      return res.status(500).json({ error: "加载月报品牌 Logo 失败" });
+    }
+  });
+
+  app.post("/api/report-logos/:month", authenticateMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      const brandId = String(req.body?.brandId || "");
+      const base64 = typeof req.body?.base64 === "string" ? req.body.base64 : "";
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      if (!REPORT_LOGO_IDS.has(brandId)) {
+        return res.status(400).json({ error: "月报品牌 Logo 标识非法" });
+      }
+      if (base64 && !isValidReportLogoDataUrl(base64)) {
+        return res.status(400).json({ error: "Logo 仅支持 PNG/JPG/JPEG/WEBP，且文件需控制在 2.5MB 以内。" });
+      }
+
+      const storage = loadStorage();
+      if (!storage.month_configs) storage.month_configs = {};
+      const config = storage.month_configs[month] || {};
+      if (getSnapshotMeta(config).locked) {
+        return res.status(423).json({
+          error: "该账期已锁定为最终版，请先解除锁定后再修改月报 Logo。",
+          snapshot: getSnapshotMeta(config)
+        });
+      }
+
+      const nextLogos = { ...(config.report_logos || {}) };
+      if (base64) nextLogos[brandId] = base64;
+      else delete nextLogos[brandId];
+      config.report_logos = nextLogos;
+      config._updated_at = new Date().toISOString();
+      config._updated_by = req.user?.username || "unknown";
+      markSnapshotStale(config, "月报品牌 Logo 已发生修改", req.user?.username);
+      syncWorkingSnapshotContent(config);
+      storage.month_configs[month] = config;
+      saveStorage(storage);
+
+      return res.json({
+        success: true,
+        reportLogos: nextLogos,
+        snapshot: getSnapshotMeta(config)
+      });
+    } catch (e: any) {
+      console.error("保存月报品牌 Logo 失败:", e);
+      return res.status(500).json({ error: e.message || "保存月报品牌 Logo 失败" });
     }
   });
 
@@ -1333,9 +1688,10 @@ echo "=================================================="
   });
 
   // 多端协同编辑实时监听与同步接口 (基于 Server DB & Memory)
-  app.post("/api/collaboration/sync", (req, res) => {
+  app.post("/api/collaboration/sync", authenticateMiddleware, (req: any, res) => {
     try {
-      const { month, username, editingField, clientComments, syncVersion } = req.body;
+      const { month, editingField, clientComments, syncVersion } = req.body;
+      const username = req.user?.username || "unknown";
       if (!month || !username) {
         return res.status(400).json({ error: "Missing month or username" });
       }
@@ -1376,7 +1732,14 @@ echo "=================================================="
         storage.month_configs[month] = {};
       }
 
-      if (clientComments) {
+      const hasClientCommentChanges = !!clientComments && typeof clientComments === "object" && Object.keys(clientComments).length > 0;
+      if (hasClientCommentChanges) {
+        if (getSnapshotMeta(storage.month_configs[month]).locked) {
+          return res.status(423).json({
+            error: "该账期已锁定为最终版，请先解除锁定后再修改月报文字或专项页。",
+            snapshot: getSnapshotMeta(storage.month_configs[month])
+          });
+        }
         if (!storage.month_configs[month].custom_comments) {
           storage.month_configs[month].custom_comments = {};
         }
@@ -1395,6 +1758,9 @@ echo "=================================================="
         if (clientComments.slideOrder !== undefined && (isV2Client || !sComments.slideOrder)) sComments.slideOrder = clientComments.slideOrder;
 
         storage.month_configs[month].custom_comments = sComments;
+        markSnapshotStale(storage.month_configs[month], "月报文字、专项页或页面顺序已发生修改", username);
+        // 文本/专项页不改变统计指标，可直接同步进共享工作版，避免另一台电脑仍看到旧文字。
+        syncWorkingSnapshotContent(storage.month_configs[month]);
         saveStorage(storage);
       }
 
@@ -1776,8 +2142,77 @@ echo "=================================================="
         storage.month_configs = {};
       }
       const isSubmit = req.body.is_submit === "true";
+      if (isSubmit) {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+          return res.status(401).json({ detail: "保存月报需要登录认证" });
+        }
+        const submitUser = verifyToken(authHeader.substring(7));
+        if (!submitUser) {
+          return res.status(419).json({ detail: "登录已过期，请重新登录后保存月报" });
+        }
+        req.user = submitUser;
+      }
       const hasCached = storage.month_configs[month] !== undefined;
       const cachedConfig = hasCached ? storage.month_configs[month] : {};
+      const cachedSnapshotMeta = getSnapshotMeta(cachedConfig);
+      const submittedBaseRevision = isSubmit ? Number(req.body.base_revision) : null;
+
+      if (isSubmit) {
+        const currentRevision = Number(cachedConfig._revision || 0);
+        if (!Number.isFinite(submittedBaseRevision) || submittedBaseRevision !== currentRevision) {
+          return res.status(409).json({
+            detail: "当前账期已被其他用户更新，请刷新服务器最新数据后再生成月报。",
+            revision: currentRevision,
+            config: pickSharedMonthConfig(cachedConfig),
+            snapshot: cachedSnapshotMeta
+          });
+        }
+      }
+
+      // 已锁定账期直接返回最终版快照，彻底隔离 RDS/钉钉等历史源后续补单、回写造成的数字漂移。
+      if (cachedSnapshotMeta.locked) {
+        if (isSubmit) {
+          return res.status(423).json({
+            detail: "该账期已锁定为最终版。需要修订时，请先由管理员解除最终版锁定。",
+            snapshot: cachedSnapshotMeta
+          });
+        }
+        const frozenMetrics = cloneJson(cachedConfig.final_snapshot.metrics);
+        frozenMetrics.snapshot_meta = {
+          ...cachedSnapshotMeta,
+          source: "final_snapshot",
+          release: APP_RELEASE
+        };
+        return res.json({
+          status: "success",
+          has_saved_config: true,
+          data_source: "final_snapshot",
+          snapshot: cachedSnapshotMeta,
+          metrics: frozenMetrics
+        });
+      }
+
+      // 普通打开页面时使用服务器上一次共享工作版；工作版即使已标记待重新生成，也保持固定，
+      // 避免不同电脑在不同时间重新查询历史 RDS/钉钉后拼出不同的月报预览。
+      if (!isSubmit && cachedConfig.last_generated_snapshot?.metrics) {
+        const workingMetrics = cloneJson(cachedConfig.last_generated_snapshot.metrics);
+        workingMetrics.custom_comments = cloneJson(
+          cachedConfig.last_generated_snapshot.comments || cachedConfig.custom_comments || workingMetrics.custom_comments || {}
+        );
+        workingMetrics.snapshot_meta = {
+          ...cachedSnapshotMeta,
+          source: "working_snapshot",
+          release: APP_RELEASE
+        };
+        return res.json({
+          status: "success",
+          has_saved_config: true,
+          data_source: "working_snapshot",
+          snapshot: getSnapshotMeta(cachedConfig),
+          metrics: workingMetrics
+        });
+      }
 
       const [yearStr, monthStr] = month.split("-");
       const year = parseInt(yearStr, 10);
@@ -2422,6 +2857,15 @@ echo "=================================================="
         const latestStorage = loadStorage();
         if (!latestStorage.month_configs) latestStorage.month_configs = {};
         const existingMonthConfig = latestStorage.month_configs[month] || {};
+        const latestRevision = Number(existingMonthConfig._revision || 0);
+        if (submittedBaseRevision !== latestRevision) {
+          return res.status(409).json({
+            detail: "生成过程中当前账期被其他用户更新，本次结果未写入。已保护服务器最新数据，请刷新后重新生成。",
+            revision: latestRevision,
+            config: pickSharedMonthConfig(existingMonthConfig),
+            snapshot: getSnapshotMeta(existingMonthConfig)
+          });
+        }
         latestStorage.month_configs[month] = {
           ...existingMonthConfig,
           curr_backup_4g: final_curr_backup_4g,
@@ -2435,116 +2879,113 @@ echo "=================================================="
           curr_boh_data,
           prev_boh_data,
           _revision: Number(existingMonthConfig._revision || 0) + 1,
-          _updated_at: new Date().toISOString()
+          _updated_at: new Date().toISOString(),
+          _updated_by: req.user?.username || existingMonthConfig._updated_by || "unknown"
         };
+        markSnapshotStale(latestStorage.month_configs[month], "月报数据已重新生成，等待重新锁定最终版", req.user?.username);
         saveStorage(latestStorage);
         storage.month_configs = latestStorage.month_configs;
       }
 
+      const historicalDrift = detectHistoricalDrift(storage.month_configs[month], {
+        current_month_tickets_total,
+        current_month_avg_days,
+        compare_month_avg_days
+      });
+
+      const liveMetrics: any = {
+        prev_month_label,
+        curr_month_label,
+        custom_comments: storage.month_configs[month]?.custom_comments || null,
+        curr_boh_total: curr_boh_total || 0,
+        prev_boh_total: prev_boh_total || 0,
+        current_month_tickets_total,
+        compare_month_tickets_total,
+        current_month_avg_days,
+        compare_month_avg_days,
+        compare_month_qiyu_valid: compare_qiyu_raw.valid,
+        current_qiyu_raw,
+        compare_qiyu_raw,
+        current_categories: qiyu_categories_current,
+        compare_categories: qiyu_categories_compare,
+        curr_boh_data,
+        prev_boh_data,
+        ticket_brand_distribution,
+        ticket_cate_distribution,
+        ticket_shop_ranking,
+        supplier_splits,
+        current_renwood_count: Number(final_curr_renwood_count || 0),
+        current_new_shops: Number(final_curr_new_shops || 0),
+        compare_month_renovation_count: Number(final_prev_renwood_count || 0),
+        compare_month_new_shops: Number(final_prev_new_shops || 0),
+        curr_backup_4g: Number(final_curr_backup_4g || 0),
+        prev_backup_4g: Number(final_prev_backup_4g || 0),
+        curr_dingtalk_sessions: Number(final_curr_dingtalk_sessions || 0),
+        prev_dingtalk_sessions: Number(final_prev_dingtalk_sessions || 0),
+        snapshot_meta: {
+          ...getSnapshotMeta(storage.month_configs[month]),
+          source: "live",
+          release: APP_RELEASE,
+          driftDetected: historicalDrift.detected,
+          driftEvidence: historicalDrift.evidence
+        }
+      };
+
+      // 每次显式生成都保留完整服务器端版本，用户即使暂时未点击“锁定最终版”也有可追溯的生成记录。
+      if (isSubmit) {
+        const latestStorage = loadStorage();
+        const config = latestStorage.month_configs?.[month] || {};
+        const generatedAt = new Date().toISOString();
+        const generatedVersion = Number(config.last_generated_snapshot?.version || 0) + 1;
+        const generatedMetrics = cloneJson(liveMetrics);
+        delete generatedMetrics.snapshot_meta;
+        const generatedRecord = {
+          version: generatedVersion,
+          generated_at: generatedAt,
+          generated_by: req.user?.username || "unknown",
+          release: APP_RELEASE,
+          metrics: generatedMetrics,
+          comments: cloneJson(config.custom_comments || generatedMetrics.custom_comments || {}),
+          report_logos: cloneJson(config.report_logos || {})
+        };
+        config.last_generated_snapshot = generatedRecord;
+        clearWorkingSnapshotStale(config);
+        const history = Array.isArray(config.generated_history) ? config.generated_history : [];
+        config.generated_history = [...history, {
+          version: generatedVersion,
+          generated_at: generatedAt,
+          generated_by: generatedRecord.generated_by,
+          metrics: generatedMetrics,
+          comments: generatedRecord.comments,
+          report_logos: generatedRecord.report_logos
+        }].slice(-10);
+        latestStorage.month_configs[month] = config;
+        saveStorage(latestStorage);
+        storage.month_configs = latestStorage.month_configs;
+      }
+
+      const latestConfig = storage.month_configs[month] || {};
+      liveMetrics.snapshot_meta = {
+        ...getSnapshotMeta(latestConfig),
+        source: isSubmit ? "working_snapshot" : "live",
+        release: APP_RELEASE,
+        driftDetected: historicalDrift.detected,
+        driftEvidence: historicalDrift.evidence
+      };
+
       res.json({
         status: "success",
-        has_saved_config: hasCached,
-        metrics: {
-          prev_month_label,
-          curr_month_label,
-          custom_comments: storage.month_configs[month]?.custom_comments || null,
-          curr_boh_total: curr_boh_total || 0,
-          prev_boh_total: prev_boh_total || 0,
-          current_month_tickets_total,
-          compare_month_tickets_total,
-          current_month_avg_days,
-          compare_month_avg_days,
-          compare_month_qiyu_valid: compare_qiyu_raw.valid,
-          current_qiyu_raw,
-          compare_qiyu_raw,
-          current_categories: qiyu_categories_current,
-          compare_categories: qiyu_categories_compare,
-          curr_boh_data,
-          prev_boh_data,
-          ticket_brand_distribution,
-          ticket_cate_distribution,
-          ticket_shop_ranking,
-          supplier_splits,
-          current_renwood_count: Number(final_curr_renwood_count || 0),
-          current_new_shops: Number(final_curr_new_shops || 0),
-          compare_month_renovation_count: Number(final_prev_renwood_count || 0),
-          compare_month_new_shops: Number(final_prev_new_shops || 0),
-          curr_backup_4g: Number(final_curr_backup_4g || 0),
-          prev_backup_4g: Number(final_prev_backup_4g || 0),
-          curr_dingtalk_sessions: Number(final_curr_dingtalk_sessions || 0),
-          prev_dingtalk_sessions: Number(final_prev_dingtalk_sessions || 0)
-        }
+        has_saved_config: !!latestConfig,
+        data_source: isSubmit ? "working_snapshot" : "live",
+        revision: Number(latestConfig._revision || 0),
+        config: pickSharedMonthConfig(latestConfig),
+        snapshot: getSnapshotMeta(latestConfig),
+        metrics: liveMetrics
       });
 
     } catch (e: any) {
       console.error(e);
       res.status(500).json({ detail: e.message || "后端自动化数据处理管道出现致命内部故障" });
-    }
-  });
-
-  // 协同同步端点：处理多用户实时编辑状态、评论、项目专页及页面排序的服务器端持久化与合流
-  app.post("/api/collaboration/sync", async (req, res) => {
-    try {
-      const { month, username, editingField, clientComments } = req.body;
-
-      if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-        return res.status(400).json({ detail: "账期格式非法" });
-      }
-
-      const storage = loadStorage();
-      if (!storage.month_configs) {
-        storage.month_configs = {};
-      }
-      if (!storage.month_configs[month]) {
-        storage.month_configs[month] = {};
-      }
-
-      const config = storage.month_configs[month];
-
-      // 保存客户端提交的评论和项目专页数据到服务器
-      if (clientComments) {
-        if (!config.custom_comments) {
-          config.custom_comments = {};
-        }
-        const cc = config.custom_comments;
-
-        if (clientComments.slide2Bullets !== undefined) {
-          cc.slide2Bullets = clientComments.slide2Bullets;
-        }
-        if (clientComments.slide4Comment !== undefined) {
-          cc.slide4Comment = clientComments.slide4Comment;
-        }
-        if (clientComments.slide5Comment !== undefined) {
-          cc.slide5Comment = clientComments.slide5Comment;
-        }
-        if (clientComments.slide6Comment !== undefined) {
-          cc.slide6Comment = clientComments.slide6Comment;
-        }
-        if (clientComments.slide7Comment !== undefined) {
-          cc.slide7Comment = clientComments.slide7Comment;
-        }
-        if (clientComments.slide8Comment !== undefined) {
-          cc.slide8Comment = clientComments.slide8Comment;
-        }
-        if (clientComments.customProjectSlides !== undefined) {
-          cc.customProjectSlides = clientComments.customProjectSlides;
-        }
-        if (clientComments.slideOrder !== undefined) {
-          cc.slideOrder = clientComments.slideOrder;
-        }
-      }
-
-      saveStorage(storage);
-
-      // 返回当前月份的所有协同数据（供其他客户端同步）
-      res.json({
-        activeEditors: [], // 简化实现：不追踪活跃编辑器，后续可扩展
-        serverComments: config.custom_comments || {}
-      });
-
-    } catch (e: any) {
-      console.error("[Collaboration Sync] Error:", e);
-      res.status(500).json({ detail: e.message || "协同同步失败" });
     }
   });
 

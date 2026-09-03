@@ -90,6 +90,33 @@ export interface SlideOrderConfig {
   title: string;
 }
 
+export interface ReportSnapshotMeta {
+  exists: boolean;
+  locked: boolean;
+  stale: boolean;
+  staleAt?: string | null;
+  staleReason?: string | null;
+  finalizedAt?: string | null;
+  finalizedBy?: string | null;
+  snapshotId?: string | null;
+  version?: number;
+  workingExists?: boolean;
+  workingVersion?: number;
+  workingGeneratedAt?: string | null;
+  workingGeneratedBy?: string | null;
+  workingStale?: boolean;
+  workingStaleAt?: string | null;
+  workingStaleReason?: string | null;
+  source?: "live" | "working_snapshot" | "final_snapshot";
+  release?: string;
+  driftDetected?: boolean;
+  driftEvidence?: {
+    expected?: Record<string, number>;
+    actual?: Record<string, number>;
+    source?: string;
+  } | null;
+}
+
 export interface ReportMetrics {
   prev_month_label: string;
   curr_month_label: string;
@@ -118,4 +145,6 @@ export interface ReportMetrics {
   prev_backup_4g: number;
   curr_dingtalk_sessions: number;
   prev_dingtalk_sessions: number;
+  custom_comments?: Record<string, any> | null;
+  snapshot_meta?: ReportSnapshotMeta;
 }

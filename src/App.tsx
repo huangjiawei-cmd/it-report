@@ -39,7 +39,7 @@ import {
   Activity,
   RefreshCw
 } from "lucide-react";
-import { ReportMetrics, BohData, SystemUser, AuditLogEntry } from "./types";
+import { ReportMetrics, ReportSnapshotMeta, BohData, SystemUser, AuditLogEntry } from "./types";
 import { ReportPage } from "./components/ReportPage";
 import { FaultDiagnosisPanel } from "./components/FaultDiagnosisPanel";
 import { BrandCollisionChamber } from "./components/BrandCollisionChamber";
@@ -53,13 +53,13 @@ export default function App() {
   // 封装具有 Authorization Header 的统一 Fetch 辅助工具
   const apiFetch = async (url: string, options: RequestInit = {}) => {
     const token = localStorage.getItem("auth_token");
-    const headers = {
-      ...options.headers,
-      "Content-Type": "application/json",
-    } as Record<string, string>;
+    const headers = new Headers(options.headers || {});
 
     if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
     }
 
     const res = await fetch(url, { ...options, headers });
@@ -450,6 +450,19 @@ export default function App() {
     return latestMonth < "2026-06" ? "2026-06" : latestMonth;
   };
 
+  const getMonthOptions = () => {
+    const start = new Date(2026, 5, 1);
+    const now = new Date();
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const result: string[] = [];
+    const cursor = new Date(start);
+    while (cursor <= end) {
+      result.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return result;
+  };
+
   // 每次进入系统默认打开最新可填报账期，避免不同电脑被各自历史 selected_month 锁在旧月份。
   const [month, setMonth] = useState(() => {
     const latestMonth = getLatestAvailableMonth();
@@ -661,6 +674,8 @@ export default function App() {
 
   // 5. 核心计算与渲染大盘状态
   const [metrics, setMetrics] = useState<ReportMetrics | null>(null);
+  const [monthSnapshotMeta, setMonthSnapshotMeta] = useState<ReportSnapshotMeta | null>(null);
+  const snapshotLocked = !!monthSnapshotMeta?.locked;
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [exportPDFTrigger, setExportPDFTrigger] = useState<(() => Promise<void>) | null>(null);
@@ -668,7 +683,7 @@ export default function App() {
   const [dbStatus, setDbStatus] = useState<"loading" | "connected" | "disconnected">("loading");
   const [loadedMonth, setLoadedMonth] = useState<string>(() => month);
   const sharedHydratedMonthRef = useRef<string | null>(null);
-  const sharedBaselineRef = useRef<{ month: string; config: Record<string, any> } | null>(null);
+  const sharedBaselineRef = useRef<{ month: string; config: Record<string, any>; revision: number } | null>(null);
   const sharedSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sharedSaveSequenceRef = useRef(0);
 
@@ -748,6 +763,10 @@ export default function App() {
   // 7. 一键调用全栈数据管道进行清洗汇总
   const handleGenerateReport = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (snapshotLocked) {
+      setError(`账期 ${month} 已锁定为最终版。如需修订，请先由管理员解除最终版锁定。`);
+      return;
+    }
     setLoading(true);
     setError(null);
 
@@ -764,6 +783,9 @@ export default function App() {
     formData.append("curr_boh_json", JSON.stringify(currBoh));
     formData.append("prev_boh_json", JSON.stringify(prevBoh));
     formData.append("is_submit", "true");
+    if (sharedBaselineRef.current?.month === month) {
+      formData.append("base_revision", String(sharedBaselineRef.current.revision));
+    }
 
     if (prevQiyuFile) {
       formData.append("prev_qiyu_file", prevQiyuFile);
@@ -773,7 +795,7 @@ export default function App() {
     }
 
     try {
-      const res = await fetch("/api/pipeline/run", {
+      const res = await apiFetch("/api/pipeline/run", {
         method: "POST",
         body: formData
       });
@@ -843,10 +865,36 @@ export default function App() {
 
       const resData = await res.json();
       if (!res.ok) {
+        if (res.status === 409 && resData.config) {
+          const cfg = resData.config;
+          sharedBaselineRef.current = {
+            month,
+            config: cfg,
+            revision: Number(resData.revision || 0)
+          };
+          if (cfg.curr_backup_4g !== undefined) setCurrBackup4g(cfg.curr_backup_4g);
+          if (cfg.prev_backup_4g !== undefined) setPrevBackup4g(cfg.prev_backup_4g);
+          if (cfg.curr_dingtalk_sessions !== undefined) setCurrDingTalkSessions(cfg.curr_dingtalk_sessions);
+          if (cfg.prev_dingtalk_sessions !== undefined) setPrevDingTalkSessions(cfg.prev_dingtalk_sessions);
+          if (cfg.curr_renwood_count !== undefined) setCurrRenovation(cfg.curr_renwood_count);
+          if (cfg.curr_new_shops !== undefined) setCurrNewShops(cfg.curr_new_shops);
+          if (cfg.prev_renwood_count !== undefined) setPrevRenovation(cfg.prev_renwood_count);
+          if (cfg.prev_new_shops !== undefined) setPrevNewShops(cfg.prev_new_shops);
+          if (cfg.curr_boh_data !== undefined) setCurrBoh(cfg.curr_boh_data);
+          if (cfg.prev_boh_data !== undefined) setPrevBoh(cfg.prev_boh_data);
+        }
         throw new Error(resData.detail || "自动化清洗网关内部解析出现偏差");
       }
 
       setMetrics(resData.metrics);
+      setMonthSnapshotMeta(resData.metrics?.snapshot_meta || resData.snapshot || null);
+      if (resData.config) {
+        sharedBaselineRef.current = {
+          month,
+          config: resData.config,
+          revision: Number(resData.revision || 0)
+        };
+      }
       if (resData.metrics.curr_backup_4g !== undefined) setCurrBackup4g(resData.metrics.curr_backup_4g);
       if (resData.metrics.prev_backup_4g !== undefined) setPrevBackup4g(resData.metrics.prev_backup_4g);
       if (resData.metrics.curr_dingtalk_sessions !== undefined) setCurrDingTalkSessions(resData.metrics.curr_dingtalk_sessions);
@@ -1128,20 +1176,10 @@ export default function App() {
       if (res.ok && resData.metrics) {
         // 始终加载并渲染该月份的大盘分析数据
         setMetrics(resData.metrics);
+        setMonthSnapshotMeta(resData.metrics?.snapshot_meta || resData.snapshot || null);
 
-        // 仅在服务器存在已被用户显式暂存或提交的该月份配置时，才同步灌回输入框状态中
-        if (resData.has_saved_config) {
-          if (resData.metrics.curr_backup_4g !== undefined) setCurrBackup4g(resData.metrics.curr_backup_4g);
-          if (resData.metrics.prev_backup_4g !== undefined) setPrevBackup4g(resData.metrics.prev_backup_4g);
-          if (resData.metrics.curr_dingtalk_sessions !== undefined) setCurrDingTalkSessions(resData.metrics.curr_dingtalk_sessions);
-          if (resData.metrics.prev_dingtalk_sessions !== undefined) setPrevDingTalkSessions(resData.metrics.prev_dingtalk_sessions);
-          if (resData.metrics.current_renwood_count !== undefined) setCurrRenovation(resData.metrics.current_renwood_count);
-          if (resData.metrics.current_new_shops !== undefined) setCurrNewShops(resData.metrics.current_new_shops);
-          if (resData.metrics.compare_month_renwood_count !== undefined) setPrevRenovation(resData.metrics.compare_month_renwood_count);
-          if (resData.metrics.compare_month_new_shops !== undefined) setPrevNewShops(resData.metrics.compare_month_new_shops);
-          if (resData.metrics.curr_boh_data) setCurrBoh(resData.metrics.curr_boh_data);
-          if (resData.metrics.prev_boh_data) setPrevBoh(resData.metrics.prev_boh_data);
-        }
+        // 输入框由 /api/month-config 的服务器共享配置灌入。
+        // 预览 metrics 不能反向覆盖最新填报字段，否则旧工作版会把多人协作数据写回旧值。
         stateMonthRef.current = targetMonth;
       }
     } catch (e) {
@@ -1322,25 +1360,36 @@ export default function App() {
     const hydrateMonth = async () => {
       const localDrafts = loadDraftsForMonth(month);
       let mergedDrafts = localDrafts;
+      let serverRevision = 0;
+      let serverReadSucceeded = false;
+      let serverConfigExists = false;
+      const emptyBoh = {
+        "太二": { "堂食": 0, "外卖": 0, "营销活动": 0 },
+        "九毛九": { "堂食": 0, "外卖": 0, "营销活动": 0 },
+        "怂": { "堂食": 0, "外卖": 0, "营销活动": 0 }
+      };
 
       try {
         const res = await apiFetch(`/api/month-config/${month}`);
         if (res.ok) {
           const data = await res.json();
+          serverReadSucceeded = true;
+          serverConfigExists = !!data?.exists;
+          serverRevision = Number(data?.revision || 0);
+          setMonthSnapshotMeta(data?.snapshot || null);
           const cfg = data?.config;
           if (data?.exists && cfg && typeof cfg === "object") {
             mergedDrafts = {
-              ...localDrafts,
-              curr_backup_4g: cfg.curr_backup_4g !== undefined ? cfg.curr_backup_4g : localDrafts.curr_backup_4g,
-              prev_backup_4g: cfg.prev_backup_4g !== undefined ? cfg.prev_backup_4g : localDrafts.prev_backup_4g,
-              curr_dingtalk_sessions: cfg.curr_dingtalk_sessions !== undefined ? cfg.curr_dingtalk_sessions : localDrafts.curr_dingtalk_sessions,
-              prev_dingtalk_sessions: cfg.prev_dingtalk_sessions !== undefined ? cfg.prev_dingtalk_sessions : localDrafts.prev_dingtalk_sessions,
-              curr_renwood_count: cfg.curr_renwood_count !== undefined ? cfg.curr_renwood_count : localDrafts.curr_renwood_count,
-              curr_new_shops: cfg.curr_new_shops !== undefined ? cfg.curr_new_shops : localDrafts.curr_new_shops,
-              prev_renwood_count: cfg.prev_renwood_count !== undefined ? cfg.prev_renwood_count : localDrafts.prev_renwood_count,
-              prev_new_shops: cfg.prev_new_shops !== undefined ? cfg.prev_new_shops : localDrafts.prev_new_shops,
-              curr_boh: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : localDrafts.curr_boh,
-              prev_boh: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : localDrafts.prev_boh
+              curr_backup_4g: cfg.curr_backup_4g !== undefined ? cfg.curr_backup_4g : "",
+              prev_backup_4g: cfg.prev_backup_4g !== undefined ? cfg.prev_backup_4g : "",
+              curr_dingtalk_sessions: cfg.curr_dingtalk_sessions !== undefined ? cfg.curr_dingtalk_sessions : "",
+              prev_dingtalk_sessions: cfg.prev_dingtalk_sessions !== undefined ? cfg.prev_dingtalk_sessions : "",
+              curr_renwood_count: cfg.curr_renwood_count !== undefined ? cfg.curr_renwood_count : "",
+              curr_new_shops: cfg.curr_new_shops !== undefined ? cfg.curr_new_shops : "",
+              prev_renwood_count: cfg.prev_renwood_count !== undefined ? cfg.prev_renwood_count : "",
+              prev_new_shops: cfg.prev_new_shops !== undefined ? cfg.prev_new_shops : "",
+              curr_boh: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : emptyBoh,
+              prev_boh: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : emptyBoh
             };
           }
         }
@@ -1363,8 +1412,12 @@ export default function App() {
         prev_boh_data: mergedDrafts.prev_boh
       };
 
-      sharedBaselineRef.current = { month, config: sharedConfig };
-      sharedHydratedMonthRef.current = month;
+      sharedBaselineRef.current = {
+        month,
+        config: serverConfigExists ? sharedConfig : {},
+        revision: serverRevision
+      };
+      sharedHydratedMonthRef.current = serverReadSucceeded ? month : null;
 
       setPrevBackup4g(mergedDrafts.prev_backup_4g);
       setPrevDingTalkSessions(mergedDrafts.prev_dingtalk_sessions);
@@ -1410,7 +1463,7 @@ export default function App() {
       localStorage.setItem(`draft_${month}_curr_new_shops`, String(currNewShops));
 
       // 多人共享草稿：初始化完成后仅上传真正发生变化的字段，页面打开/刷新不会全量回写。
-      if (isAuthenticated && sharedHydratedMonthRef.current === month) {
+      if (isAuthenticated && !snapshotLocked && sharedHydratedMonthRef.current === month) {
         const currentSharedConfig: Record<string, any> = {
           curr_backup_4g: currBackup4g,
           prev_backup_4g: prevBackup4g,
@@ -1441,18 +1494,47 @@ export default function App() {
           const persistPatch = async (attempt = 0) => {
             if (saveSequence !== sharedSaveSequenceRef.current || sharedHydratedMonthRef.current !== saveMonth) return;
             try {
+              const baseRevision = sharedBaselineRef.current?.month === saveMonth
+                ? sharedBaselineRef.current.revision
+                : 0;
               const res = await apiFetch(`/api/month-config/${saveMonth}`, {
                 method: "PATCH",
-                body: JSON.stringify({ patch })
+                body: JSON.stringify({ patch, baseRevision })
               });
               const data = await res.json();
+              if (res.status === 409 && data.config) {
+                const cfg = data.config;
+                setMonthSnapshotMeta(data.snapshot || null);
+                sharedBaselineRef.current = {
+                  month: saveMonth,
+                  config: cfg,
+                  revision: Number(data.revision || 0)
+                };
+                if (cfg.curr_backup_4g !== undefined) setCurrBackup4g(cfg.curr_backup_4g);
+                if (cfg.prev_backup_4g !== undefined) setPrevBackup4g(cfg.prev_backup_4g);
+                if (cfg.curr_dingtalk_sessions !== undefined) setCurrDingTalkSessions(cfg.curr_dingtalk_sessions);
+                if (cfg.prev_dingtalk_sessions !== undefined) setPrevDingTalkSessions(cfg.prev_dingtalk_sessions);
+                if (cfg.curr_renwood_count !== undefined) setCurrRenovation(cfg.curr_renwood_count);
+                if (cfg.curr_new_shops !== undefined) setCurrNewShops(cfg.curr_new_shops);
+                if (cfg.prev_renwood_count !== undefined) setPrevRenovation(cfg.prev_renwood_count);
+                if (cfg.prev_new_shops !== undefined) setPrevNewShops(cfg.prev_new_shops);
+                if (cfg.curr_boh_data !== undefined) setCurrBoh(cfg.curr_boh_data);
+                if (cfg.prev_boh_data !== undefined) setPrevBoh(cfg.prev_boh_data);
+                setError("检测到其他主管已更新当前账期，已自动加载服务器最新值。请确认后继续编辑。");
+                return;
+              }
               if (!res.ok) throw new Error(data.error || "共享账期草稿保存失败");
+              setMonthSnapshotMeta(data.snapshot || null);
               if (
                 saveSequence === sharedSaveSequenceRef.current &&
                 sharedHydratedMonthRef.current === saveMonth &&
                 data.config
               ) {
-                sharedBaselineRef.current = { month: saveMonth, config: data.config };
+                sharedBaselineRef.current = {
+                  month: saveMonth,
+                  config: data.config,
+                  revision: Number(data.revision || baseRevision + 1)
+                };
               }
             } catch (e) {
               console.error("[Shared Month Config] 自动保存失败:", e);
@@ -1470,6 +1552,7 @@ export default function App() {
     month,
     loadedMonth,
     isAuthenticated,
+    snapshotLocked,
     prevBackup4g,
     prevDingTalkSessions,
     prevBoh,
@@ -1900,12 +1983,13 @@ export default function App() {
                       isChangingMonthRef.current = true;
                       setLoading(true);
                       setMetrics(null);
+                      setMonthSnapshotMeta(null);
                       setMonth(newMonth);
                     }
                   }}
                   className="w-[140px] px-3.5 py-2 text-xs font-bold font-mono border border-slate-200 rounded-xl text-center bg-slate-50 text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition duration-150 shadow-xs cursor-pointer"
                 >
-                  {["2026-06", "2026-07", "2026-08", "2026-09", "2026-10", "2026-11", "2026-12"].map((mOpt) => {
+                  {getMonthOptions().map((mOpt) => {
                     const locked = isMonthLocked(mOpt);
                     return (
                       <option key={mOpt} value={mOpt} disabled={locked}>
@@ -1925,7 +2009,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleFetchBoh}
-                disabled={isFetchingBoh}
+                disabled={isFetchingBoh || snapshotLocked}
                 className={`px-4.5 py-2 rounded-xl text-xs font-bold tracking-tight transition duration-150 flex items-center gap-2 shadow-xs cursor-pointer active:scale-97 select-none ${
                   isFetchingBoh
                     ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
@@ -1947,6 +2031,16 @@ export default function App() {
             </div>
           </div>
 
+          {snapshotLocked && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 text-xs text-emerald-800">
+              <div className="font-bold">🔒 {month} 已锁定为最终版</div>
+              <div className="mt-1 text-[11px] text-emerald-700">
+                当前核心填报字段已进入只读状态。快照编号：{monthSnapshotMeta?.snapshotId || "已建立"}。如需修订，请在月报预览中由管理员解除锁定。
+              </div>
+            </div>
+          )}
+
+          <fieldset disabled={snapshotLocked} className="contents">
           {fetchBohMessage && (
             <div
               className={`p-4 rounded-2xl text-xs leading-relaxed flex items-center justify-between border shadow-2xs transition-all duration-300 ${
@@ -2314,6 +2408,7 @@ export default function App() {
             )}
           </div>
 
+          </fieldset>
         </form>
 
         {/* ERROR BOX */}
@@ -2406,7 +2501,12 @@ export default function App() {
                 </div>
 
                 {/* REPORT RENDER DECK */}
-                <ReportPage metrics={metrics} month={month} currentUser={currentUser} registerExportFn={registerExportPDF} />
+                <ReportPage
+                  metrics={metrics}
+                  month={month}
+                  currentUser={currentUser}
+                  registerExportFn={registerExportPDF}
+                />
               </div>
             </div>
           ) : (

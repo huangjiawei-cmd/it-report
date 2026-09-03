@@ -8,6 +8,7 @@ interface ReportProjectSlideProps {
   totalPages: number;
   onUpdate: (updated: Partial<ProjectSlide>) => void;
   onDelete: () => void;
+  readOnly?: boolean;
 }
 
 export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
@@ -16,6 +17,7 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
   totalPages,
   onUpdate,
   onDelete,
+  readOnly = false,
 }) => {
   const isPdf = useContext(PdfContext);
   const handleTitleChange = (e: React.FocusEvent<HTMLHeadingElement>) => {
@@ -102,7 +104,7 @@ export const ReportProjectSlide: React.FC<ReportProjectSlideProps> = ({
   };
 
   return (
-    <div className="w-full h-full flex flex-col justify-between px-12 py-8 bg-white relative">
+    <div className={`w-full h-full flex flex-col justify-between px-12 py-8 bg-white relative ${readOnly ? "pointer-events-none" : ""}`}>
       <div>
         {/* PPT Header */}
         <div className="flex items-center gap-3 border-b border-slate-100 pb-3 mb-4 relative">
