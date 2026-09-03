@@ -120,8 +120,10 @@ html, body, button, input, select, textarea, [contenteditable] {
 .editable-commentary {
   font-family: "Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif !important;
   font-size: 12px !important; /* 强制 text-xs 标准大小 */
+  font-weight: 400 !important;
   color: #334155 !important; /* 强制 text-slate-700 柔和深灰颜色 */
   line-height: 1.625 !important; /* 强制 leading-relaxed 行高，美观呼吸感 */
+  font-synthesis: none;
 }
 
 .editable-commentary * {
@@ -140,7 +142,7 @@ html, body, button, input, select, textarea, [contenteditable] {
 
 .editable-commentary b,
 .editable-commentary strong {
-  font-weight: 700 !important;
+  font-weight: 600 !important;
 }
 
 .editable-commentary p,

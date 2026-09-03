@@ -479,6 +479,28 @@ async function startServer() {
     }
   }
 
+  const SHARED_MONTH_CONFIG_FIELDS = [
+    "curr_backup_4g",
+    "prev_backup_4g",
+    "curr_dingtalk_sessions",
+    "prev_dingtalk_sessions",
+    "curr_renwood_count",
+    "curr_new_shops",
+    "prev_renwood_count",
+    "prev_new_shops",
+    "curr_boh_data",
+    "prev_boh_data"
+  ] as const;
+
+  const pickSharedMonthConfig = (source: any) => {
+    const result: Record<string, any> = {};
+    if (!source || typeof source !== "object") return result;
+    for (const key of SHARED_MONTH_CONFIG_FIELDS) {
+      if (source[key] !== undefined) result[key] = source[key];
+    }
+    return result;
+  };
+
   // 使用内存存储配置 multer 插件，确保大文件流畅上传
   const upload = multer({ storage: multer.memoryStorage() });
 
@@ -935,6 +957,75 @@ async function startServer() {
     } catch (e: any) {
       console.error("[USER API] Delete user error:", e);
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 多人共享账期配置：服务端为权威源，客户端只提交发生变化的字段。
+  app.get("/api/month-config/:month", authenticateMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      const storage = loadStorage();
+      const monthConfig = storage.month_configs?.[month];
+      return res.json({
+        exists: !!monthConfig,
+        config: pickSharedMonthConfig(monthConfig),
+        revision: Number(monthConfig?._revision || 0),
+        updatedAt: monthConfig?._updated_at || null,
+        updatedBy: monthConfig?._updated_by || null
+      });
+    } catch (e: any) {
+      console.error("加载共享账期配置失败:", e);
+      return res.status(500).json({ error: "加载共享账期配置失败" });
+    }
+  });
+
+  app.patch("/api/month-config/:month", authenticateMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      const patch = req.body?.patch;
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+        return res.status(400).json({ error: "共享账期补丁格式非法" });
+      }
+
+      const allowedFields = new Set<string>(SHARED_MONTH_CONFIG_FIELDS as readonly string[]);
+      const cleanPatch: Record<string, any> = {};
+      for (const [key, value] of Object.entries(patch)) {
+        if (allowedFields.has(key)) cleanPatch[key] = value;
+      }
+      if (Object.keys(cleanPatch).length === 0) {
+        return res.status(400).json({ error: "没有可保存的共享账期字段" });
+      }
+
+      const storage = loadStorage();
+      if (!storage.month_configs) storage.month_configs = {};
+      const currentConfig = storage.month_configs[month] || {};
+      const nextRevision = Number(currentConfig._revision || 0) + 1;
+      const nextConfig = {
+        ...currentConfig,
+        ...cleanPatch,
+        _revision: nextRevision,
+        _updated_at: new Date().toISOString(),
+        _updated_by: req.user?.username || "unknown"
+      };
+      storage.month_configs[month] = nextConfig;
+      saveStorage(storage);
+
+      return res.json({
+        success: true,
+        config: pickSharedMonthConfig(nextConfig),
+        revision: nextRevision,
+        updatedAt: nextConfig._updated_at,
+        updatedBy: nextConfig._updated_by
+      });
+    } catch (e: any) {
+      console.error("保存共享账期配置失败:", e);
+      return res.status(500).json({ error: "保存共享账期配置失败" });
     }
   });
 
@@ -2327,7 +2418,12 @@ echo "=================================================="
 
       // 自动保存至持久化缓存库（仅在显式提交或保存时写入，防止预拉取污染缓存）
       if (isSubmit) {
-        storage.month_configs[month] = {
+        // 数据管道执行时间较长，提交前重新读取最新存储，避免覆盖期间其他电脑刚写入的批注/专项页。
+        const latestStorage = loadStorage();
+        if (!latestStorage.month_configs) latestStorage.month_configs = {};
+        const existingMonthConfig = latestStorage.month_configs[month] || {};
+        latestStorage.month_configs[month] = {
+          ...existingMonthConfig,
           curr_backup_4g: final_curr_backup_4g,
           prev_backup_4g: final_prev_backup_4g,
           curr_dingtalk_sessions: final_curr_dingtalk_sessions,
@@ -2337,9 +2433,12 @@ echo "=================================================="
           prev_renwood_count: final_prev_renwood_count,
           prev_new_shops: final_prev_new_shops,
           curr_boh_data,
-          prev_boh_data
+          prev_boh_data,
+          _revision: Number(existingMonthConfig._revision || 0) + 1,
+          _updated_at: new Date().toISOString()
         };
-        saveStorage(storage);
+        saveStorage(latestStorage);
+        storage.month_configs = latestStorage.month_configs;
       }
 
       res.json({

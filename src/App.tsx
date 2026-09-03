@@ -443,16 +443,21 @@ export default function App() {
     return (curYear * 12 + curMonth) < (mYear * 12 + mMonth + 1);
   };
 
-  // 1. 从 localStorage 加载账期，保持刷新后的账期状态并进行未解锁校准
+  const getLatestAvailableMonth = () => {
+    const now = new Date();
+    const latest = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const latestMonth = `${latest.getFullYear()}-${String(latest.getMonth() + 1).padStart(2, "0")}`;
+    return latestMonth < "2026-06" ? "2026-06" : latestMonth;
+  };
+
+  // 每次进入系统默认打开最新可填报账期，避免不同电脑被各自历史 selected_month 锁在旧月份。
   const [month, setMonth] = useState(() => {
+    const latestMonth = getLatestAvailableMonth();
     try {
-      const saved = localStorage.getItem("selected_month") || "2026-06";
-      if (saved !== "2026-06" && isMonthLocked(saved)) {
-        return "2026-06";
-      }
-      return saved;
+      const saved = localStorage.getItem("selected_month");
+      return saved === latestMonth ? saved : latestMonth;
     } catch (e) {
-      return "2026-06";
+      return latestMonth;
     }
   });
 
@@ -531,58 +536,51 @@ export default function App() {
   }, []);
 
   const updateCustomLogo = async (brandId: string, base64Data: string) => {
-    // 1. 立即更新前端状态 & 本地缓存
-    setCustomLogos(prev => {
-      const updated = { ...prev, [brandId]: base64Data };
-      localStorage.setItem("custom_brand_logos", JSON.stringify(updated));
-      return updated;
-    });
-
-    // 2. 异步推送到后端存储以进行全局共享
     try {
-      await fetch("/api/custom-logos", {
+      const res = await apiFetch("/api/custom-logos", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ brandId, base64: base64Data })
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Logo 保存失败");
+      const nextLogos = data.customLogos || { ...customLogos, [brandId]: base64Data };
+      setCustomLogos(nextLogos);
+      localStorage.setItem("custom_brand_logos", JSON.stringify(nextLogos));
     } catch (err) {
       console.error("同步保存自定义Logo至后端失败:", err);
+      alert("Logo 未保存到服务器，请检查登录状态或网络后重试。");
     }
   };
 
   const resetCustomLogo = async (brandId: string) => {
-    // 1. 立即更新前端状态 & 本地缓存
-    setCustomLogos(prev => {
-      const updated = { ...prev };
-      delete updated[brandId];
-      localStorage.setItem("custom_brand_logos", JSON.stringify(updated));
-      return updated;
-    });
-
-    // 2. 异步同步到后端删除
     try {
-      await fetch("/api/custom-logos", {
+      const res = await apiFetch("/api/custom-logos", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ brandId, base64: "" })
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Logo 重置失败");
+      const nextLogos = data.customLogos || {};
+      setCustomLogos(nextLogos);
+      localStorage.setItem("custom_brand_logos", JSON.stringify(nextLogos));
     } catch (err) {
       console.error("同步删除自定义Logo至后端失败:", err);
+      alert("Logo 重置未写入服务器，请检查登录状态或网络后重试。");
     }
   };
 
   const resetAllLogos = async () => {
-    // 1. 立即更新前端状态 & 本地缓存
-    setCustomLogos({});
-    localStorage.removeItem("custom_brand_logos");
-
-    // 2. 异步同步到后端重置
     try {
-      await fetch("/api/custom-logos/reset-all", {
+      const res = await apiFetch("/api/custom-logos/reset-all", {
         method: "POST"
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Logo 全量重置失败");
+      setCustomLogos(data.customLogos || {});
+      localStorage.setItem("custom_brand_logos", JSON.stringify(data.customLogos || {}));
     } catch (err) {
       console.error("同步重置全部Logo至后端失败:", err);
+      alert("Logo 全量重置未写入服务器，请检查登录状态或网络后重试。");
     }
   };
 
@@ -669,6 +667,10 @@ export default function App() {
   const [serverIp, setServerIp] = useState<string>("获取中...");
   const [dbStatus, setDbStatus] = useState<"loading" | "connected" | "disconnected">("loading");
   const [loadedMonth, setLoadedMonth] = useState<string>(() => month);
+  const sharedHydratedMonthRef = useRef<string | null>(null);
+  const sharedBaselineRef = useRef<{ month: string; config: Record<string, any> } | null>(null);
+  const sharedSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sharedSaveSequenceRef = useRef(0);
 
   const registerExportPDF = useCallback((fn: () => Promise<void>) => {
     setExportPDFTrigger(() => fn);
@@ -1051,24 +1053,6 @@ export default function App() {
     setLoading(true);
     setError(null);
 
-    // 首先尝试从服务器加载该月份已保存的配置（解决新设备/浏览器数据全0问题）
-    let serverConfig: any = null;
-    try {
-      const res = await fetch("/api/pipeline/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ month: targetMonth, is_submit: "false" })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.has_saved_config && data.metrics) {
-          serverConfig = data.metrics;
-        }
-      }
-    } catch (e) {
-      console.warn("[Auto-Prefetch] 从服务器加载配置失败:", e);
-    }
-
     const formData = new FormData();
     formData.append("month", targetMonth);
     formData.append("is_submit", "false");
@@ -1077,16 +1061,11 @@ export default function App() {
 
     // Read the latest local drafts for targetMonth and append them, so the server can compute matching metrics
     const getDraftStr = (key: string, defaultValue: string) => {
-      // 优先取传入的同步权威草稿（解决 React 异步更新时的 race condition）
+      // 优先取已经过“服务器共享配置 + 本机旧草稿”合并后的权威快照。
       if (activeDraftData && activeDraftData[key] !== undefined) {
         const val = activeDraftData[key];
         if (typeof val === "object") return JSON.stringify(val);
         return String(val);
-      }
-      // 其次尝试从服务器已保存配置中获取（解决新设备数据全0问题）
-      if (serverConfig && serverConfig[key] !== undefined && serverConfig[key] !== null && serverConfig[key] !== "") {
-        if (typeof serverConfig[key] === "object") return JSON.stringify(serverConfig[key]);
-        return String(serverConfig[key]);
       }
       try {
         const saved = localStorage.getItem(`draft_${targetMonth}_${key}`);
@@ -1333,13 +1312,85 @@ export default function App() {
     };
   }, []);
 
-  // 9.5.5. 账期切换监听器：当用户切换分析月份时，自动加载草稿并触发无感知数据预拉取
+  // 9.5.5. 账期切换监听器：服务器共享配置为权威，本机 localStorage 仅作为旧草稿/断网回退。
   useEffect(() => {
-    if (/^\d{4}-\d{2}$/.test(month)) {
-      const drafts = loadDraftsForMonth(month);
-      autoPrefetch(month, drafts);
-    }
-  }, [month, loadDraftsForMonth, autoPrefetch]);
+    if (!isAuthenticated || !/^\d{4}-\d{2}$/.test(month)) return;
+
+    let cancelled = false;
+    sharedHydratedMonthRef.current = null;
+
+    const hydrateMonth = async () => {
+      const localDrafts = loadDraftsForMonth(month);
+      let mergedDrafts = localDrafts;
+
+      try {
+        const res = await apiFetch(`/api/month-config/${month}`);
+        if (res.ok) {
+          const data = await res.json();
+          const cfg = data?.config;
+          if (data?.exists && cfg && typeof cfg === "object") {
+            mergedDrafts = {
+              ...localDrafts,
+              curr_backup_4g: cfg.curr_backup_4g !== undefined ? cfg.curr_backup_4g : localDrafts.curr_backup_4g,
+              prev_backup_4g: cfg.prev_backup_4g !== undefined ? cfg.prev_backup_4g : localDrafts.prev_backup_4g,
+              curr_dingtalk_sessions: cfg.curr_dingtalk_sessions !== undefined ? cfg.curr_dingtalk_sessions : localDrafts.curr_dingtalk_sessions,
+              prev_dingtalk_sessions: cfg.prev_dingtalk_sessions !== undefined ? cfg.prev_dingtalk_sessions : localDrafts.prev_dingtalk_sessions,
+              curr_renwood_count: cfg.curr_renwood_count !== undefined ? cfg.curr_renwood_count : localDrafts.curr_renwood_count,
+              curr_new_shops: cfg.curr_new_shops !== undefined ? cfg.curr_new_shops : localDrafts.curr_new_shops,
+              prev_renwood_count: cfg.prev_renwood_count !== undefined ? cfg.prev_renwood_count : localDrafts.prev_renwood_count,
+              prev_new_shops: cfg.prev_new_shops !== undefined ? cfg.prev_new_shops : localDrafts.prev_new_shops,
+              curr_boh: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : localDrafts.curr_boh,
+              prev_boh: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : localDrafts.prev_boh
+            };
+          }
+        }
+      } catch (e) {
+        console.warn("[Shared Month Config] 服务器读取失败，暂时使用本机草稿:", e);
+      }
+
+      if (cancelled) return;
+
+      const sharedConfig = {
+        curr_backup_4g: mergedDrafts.curr_backup_4g,
+        prev_backup_4g: mergedDrafts.prev_backup_4g,
+        curr_dingtalk_sessions: mergedDrafts.curr_dingtalk_sessions,
+        prev_dingtalk_sessions: mergedDrafts.prev_dingtalk_sessions,
+        curr_renwood_count: mergedDrafts.curr_renwood_count,
+        curr_new_shops: mergedDrafts.curr_new_shops,
+        prev_renwood_count: mergedDrafts.prev_renwood_count,
+        prev_new_shops: mergedDrafts.prev_new_shops,
+        curr_boh_data: mergedDrafts.curr_boh,
+        prev_boh_data: mergedDrafts.prev_boh
+      };
+
+      sharedBaselineRef.current = { month, config: sharedConfig };
+      sharedHydratedMonthRef.current = month;
+
+      setPrevBackup4g(mergedDrafts.prev_backup_4g);
+      setPrevDingTalkSessions(mergedDrafts.prev_dingtalk_sessions);
+      setPrevRenovation(mergedDrafts.prev_renwood_count);
+      setPrevNewShops(mergedDrafts.prev_new_shops);
+      setPrevBoh(mergedDrafts.prev_boh);
+      setCurrBackup4g(mergedDrafts.curr_backup_4g);
+      setCurrDingTalkSessions(mergedDrafts.curr_dingtalk_sessions);
+      setCurrRenovation(mergedDrafts.curr_renwood_count);
+      setCurrNewShops(mergedDrafts.curr_new_shops);
+      setCurrBoh(mergedDrafts.curr_boh);
+      setLoadedMonth(month);
+      stateMonthRef.current = month;
+
+      autoPrefetch(month, mergedDrafts);
+    };
+
+    hydrateMonth();
+    return () => {
+      cancelled = true;
+      if (sharedSaveTimerRef.current) {
+        clearTimeout(sharedSaveTimerRef.current);
+        sharedSaveTimerRef.current = null;
+      }
+    };
+  }, [month, isAuthenticated, loadDraftsForMonth, autoPrefetch]);
 
   // 9.6. 实时草稿持久化监听器：只要用户修改了任何字段，自动秒级保存至 localStorage 对应的月份中
   useEffect(() => {
@@ -1357,10 +1408,68 @@ export default function App() {
       localStorage.setItem(`draft_${month}_prev_new_shops`, String(prevNewShops));
       localStorage.setItem(`draft_${month}_curr_renwood_count`, String(currRenovation));
       localStorage.setItem(`draft_${month}_curr_new_shops`, String(currNewShops));
+
+      // 多人共享草稿：初始化完成后仅上传真正发生变化的字段，页面打开/刷新不会全量回写。
+      if (isAuthenticated && sharedHydratedMonthRef.current === month) {
+        const currentSharedConfig: Record<string, any> = {
+          curr_backup_4g: currBackup4g,
+          prev_backup_4g: prevBackup4g,
+          curr_dingtalk_sessions: currDingTalkSessions,
+          prev_dingtalk_sessions: prevDingTalkSessions,
+          curr_renwood_count: currRenovation,
+          curr_new_shops: currNewShops,
+          prev_renwood_count: prevRenovation,
+          prev_new_shops: prevNewShops,
+          curr_boh_data: currBoh,
+          prev_boh_data: prevBoh
+        };
+        const baseline = sharedBaselineRef.current?.month === month
+          ? sharedBaselineRef.current.config
+          : {};
+        const patch: Record<string, any> = {};
+        for (const [key, value] of Object.entries(currentSharedConfig)) {
+          if (JSON.stringify(value) !== JSON.stringify(baseline[key])) {
+            patch[key] = value;
+          }
+        }
+
+        if (Object.keys(patch).length > 0) {
+          if (sharedSaveTimerRef.current) clearTimeout(sharedSaveTimerRef.current);
+          const saveSequence = ++sharedSaveSequenceRef.current;
+          const saveMonth = month;
+
+          const persistPatch = async (attempt = 0) => {
+            if (saveSequence !== sharedSaveSequenceRef.current || sharedHydratedMonthRef.current !== saveMonth) return;
+            try {
+              const res = await apiFetch(`/api/month-config/${saveMonth}`, {
+                method: "PATCH",
+                body: JSON.stringify({ patch })
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || "共享账期草稿保存失败");
+              if (
+                saveSequence === sharedSaveSequenceRef.current &&
+                sharedHydratedMonthRef.current === saveMonth &&
+                data.config
+              ) {
+                sharedBaselineRef.current = { month: saveMonth, config: data.config };
+              }
+            } catch (e) {
+              console.error("[Shared Month Config] 自动保存失败:", e);
+              if (attempt < 1 && saveSequence === sharedSaveSequenceRef.current) {
+                setTimeout(() => persistPatch(attempt + 1), 1500);
+              }
+            }
+          };
+
+          sharedSaveTimerRef.current = setTimeout(() => persistPatch(), 800);
+        }
+      }
     }
   }, [
     month,
     loadedMonth,
+    isAuthenticated,
     prevBackup4g,
     prevDingTalkSessions,
     prevBoh,
@@ -1784,7 +1893,7 @@ export default function App() {
                   onChange={(e) => {
                     const newMonth = e.target.value;
                     if (isMonthLocked(newMonth)) {
-                      alert(`账期 ${newMonth} 尚未解锁！当前最新可填报账期为 2026-06`);
+                      alert(`账期 ${newMonth} 尚未解锁！当前最新可填报账期为 ${getLatestAvailableMonth()}`);
                       return;
                     }
                     if (newMonth !== month) {

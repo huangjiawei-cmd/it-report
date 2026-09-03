@@ -101,6 +101,24 @@ const renderCustomRightLabel = (props: any) => {
   );
 };
 
+// 会话对比属于精确业务统计，四位数也直接展示完整值。
+const renderExactRightLabel = (props: any) => {
+  const { x, y, width, height, value } = props;
+  if (value === undefined || value === null || value === 0) return null;
+  return (
+    <text
+      x={x + width + 8}
+      y={y + height / 2 + 4}
+      fill="#1e293b"
+      fontSize={13.5}
+      fontWeight="bold"
+      textAnchor="start"
+    >
+      {Number(value).toString()}
+    </text>
+  );
+};
+
 // 1. Slide 4: 线上咨询问题分析 - Vertical Grouped Bar Chart with top labels
 interface QiyuCategoriesProps {
   current: Record<string, number>;
@@ -200,14 +218,14 @@ export const QiyuCompareChart: React.FC<QiyuCompareProps> = ({
           dataKey={prevLabel}
           fill={COLOR_COMP_BLUE}
           barSize={10}
-          label={renderCustomRightLabel}
+          label={renderExactRightLabel}
           isAnimationActive={false}
         />
         <Bar
           dataKey={currLabel}
           fill={COLOR_CURR_RED}
           barSize={10}
-          label={renderCustomRightLabel}
+          label={renderExactRightLabel}
           isAnimationActive={false}
         />
       </BarChart>
