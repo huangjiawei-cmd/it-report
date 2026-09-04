@@ -676,6 +676,15 @@ export default function App() {
   const [metrics, setMetrics] = useState<ReportMetrics | null>(null);
   const [monthSnapshotMeta, setMonthSnapshotMeta] = useState<ReportSnapshotMeta | null>(null);
   const snapshotLocked = !!monthSnapshotMeta?.locked;
+  const [reportAccess, setReportAccess] = useState<{
+    month: string;
+    assignedWriter: string | null;
+    isAdmin: boolean;
+    isAssignedWriter: boolean;
+    canEdit: boolean;
+    status?: string;
+  } | null>(null);
+  const canEditMonth = reportAccess?.month === month && !!reportAccess?.canEdit && !snapshotLocked;
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [exportPDFTrigger, setExportPDFTrigger] = useState<(() => Promise<void>) | null>(null);
@@ -687,6 +696,28 @@ export default function App() {
   const sharedSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sharedSaveSequenceRef = useRef(0);
 
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser || !/^\d{4}-\d{2}$/.test(month)) {
+      setReportAccess(null);
+      return;
+    }
+    setReportAccess(null);
+    let cancelled = false;
+    apiFetch(`/api/report-access/${month}`)
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "读取月报权限失败");
+        if (!cancelled) setReportAccess(data);
+      })
+      .catch((e) => {
+        console.error("[Report Access] 权限读取失败:", e);
+        if (!cancelled) setReportAccess(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, currentUser?.username, currentUser?.role, month]);
+
   const registerExportPDF = useCallback((fn: () => Promise<void>) => {
     setExportPDFTrigger(() => fn);
   }, []);
@@ -696,6 +727,10 @@ export default function App() {
   const [fetchBohMessage, setFetchBohMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const handleFetchBoh = async () => {
+    if (!canEditMonth) {
+      setFetchBohMessage({ type: "error", text: `当前账期由 ${reportAccess?.assignedWriter || "指定撰写人"} 负责，当前账号为只读。` });
+      return;
+    }
     setIsFetchingBoh(true);
     setFetchBohMessage(null);
     try {
@@ -765,6 +800,10 @@ export default function App() {
     e.preventDefault();
     if (snapshotLocked) {
       setError(`账期 ${month} 已锁定为最终版。如需修订，请先由管理员解除最终版锁定。`);
+      return;
+    }
+    if (!canEditMonth) {
+      setError(`当前账期由 ${reportAccess?.assignedWriter || "指定撰写人"} 负责，当前账号仅可查看。`);
       return;
     }
     setLoading(true);
@@ -1463,7 +1502,7 @@ export default function App() {
       localStorage.setItem(`draft_${month}_curr_new_shops`, String(currNewShops));
 
       // 多人共享草稿：初始化完成后仅上传真正发生变化的字段，页面打开/刷新不会全量回写。
-      if (isAuthenticated && !snapshotLocked && sharedHydratedMonthRef.current === month) {
+      if (isAuthenticated && canEditMonth && sharedHydratedMonthRef.current === month) {
         const currentSharedConfig: Record<string, any> = {
           curr_backup_4g: currBackup4g,
           prev_backup_4g: prevBackup4g,
@@ -1552,6 +1591,7 @@ export default function App() {
     month,
     loadedMonth,
     isAuthenticated,
+    canEditMonth,
     snapshotLocked,
     prevBackup4g,
     prevDingTalkSessions,
@@ -2009,7 +2049,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleFetchBoh}
-                disabled={isFetchingBoh || snapshotLocked}
+                disabled={isFetchingBoh || !canEditMonth}
                 className={`px-4.5 py-2 rounded-xl text-xs font-bold tracking-tight transition duration-150 flex items-center gap-2 shadow-xs cursor-pointer active:scale-97 select-none ${
                   isFetchingBoh
                     ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
@@ -2040,7 +2080,19 @@ export default function App() {
             </div>
           )}
 
-          <fieldset disabled={snapshotLocked} className="contents">
+          {!snapshotLocked && reportAccess && (
+            <div className={`rounded-2xl p-4 text-xs border ${reportAccess.canEdit ? "bg-indigo-50 border-indigo-200 text-indigo-800" : "bg-slate-50 border-slate-200 text-slate-600"}`}>
+              <div className="font-bold">
+                本月负责人：{reportAccess.assignedWriter || "未指定"}
+                {reportAccess.isAdmin ? " · 管理员可审阅并微调" : reportAccess.isAssignedWriter ? " · 当前账号可编辑" : " · 当前账号只读"}
+              </div>
+              <div className="mt-1 text-[11px] opacity-80">
+                当前账期使用服务器同一份月报数据。负责人完成后，管理员进入同一页面进行微调和最终审阅。
+              </div>
+            </div>
+          )}
+
+          <fieldset disabled={!canEditMonth} className="contents">
           {fetchBohMessage && (
             <div
               className={`p-4 rounded-2xl text-xs leading-relaxed flex items-center justify-between border shadow-2xs transition-all duration-300 ${
@@ -2486,7 +2538,7 @@ export default function App() {
                     </div>
                     <div>
                       <h3 className="text-white text-sm font-bold">
-                        IT运维月报（{month} 账期已生成）
+                        IT运维月报（{month} · 负责人 {reportAccess?.assignedWriter || "未指定"}）
                       </h3>
                     </div>
                   </div>
@@ -2506,6 +2558,8 @@ export default function App() {
                   month={month}
                   currentUser={currentUser}
                   registerExportFn={registerExportPDF}
+                  canEdit={reportAccess?.month === month && !!reportAccess?.canEdit}
+                  assignedWriter={reportAccess?.assignedWriter || null}
                 />
               </div>
             </div>

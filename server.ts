@@ -437,6 +437,49 @@ async function startServer() {
     next();
   };
 
+  const REPORT_WRITER_ROTATION = ["柯秀明", "黄嘉伟", "林景明"] as const;
+  const REPORT_WRITER_ANCHOR = "2026-08";
+
+  const getDefaultReportWriter = (month: string) => {
+    if (!/^\d{4}-\d{2}$/.test(month)) return null;
+    const [anchorYear, anchorMonth] = REPORT_WRITER_ANCHOR.split("-").map(Number);
+    const [year, monthNumber] = month.split("-").map(Number);
+    const offset = (year - anchorYear) * 12 + (monthNumber - anchorMonth);
+    const index = ((offset % REPORT_WRITER_ROTATION.length) + REPORT_WRITER_ROTATION.length) % REPORT_WRITER_ROTATION.length;
+    return REPORT_WRITER_ROTATION[index];
+  };
+
+  const getReportWriter = (month: string, storage?: any) => {
+    const explicitWriter = storage?.month_configs?.[month]?._assigned_writer;
+    return typeof explicitWriter === "string" && explicitWriter.trim()
+      ? explicitWriter.trim()
+      : getDefaultReportWriter(month);
+  };
+
+  const getReportAccess = (user: any, month: string, storage?: any) => {
+    const assignedWriter = getReportWriter(month, storage);
+    const isAdmin = user?.role === "管理员";
+    const isAssignedWriter = !!assignedWriter && user?.username === assignedWriter;
+    return {
+      assignedWriter,
+      isAdmin,
+      isAssignedWriter,
+      canEdit: isAdmin || isAssignedWriter
+    };
+  };
+
+  const requireReportEditAccess = (req: any, res: any, month: string, storage?: any) => {
+    const access = getReportAccess(req.user, month, storage);
+    if (!access.canEdit) {
+      res.status(403).json({
+        error: `当前账期由 ${access.assignedWriter || "指定撰写人"} 负责，其他撰写人仅可查看。`,
+        access
+      });
+      return null;
+    }
+    return access;
+  };
+
   function loadStorage() {
     try {
       if (fs.existsSync(STORAGE_FILE)) {
@@ -501,7 +544,7 @@ async function startServer() {
     return result;
   };
 
-  const APP_RELEASE = "1.5.0-report-consistency";
+  const APP_RELEASE = "1.5.1-month-owner-review";
   const REPORT_LOGO_IDS = new Set(["jiumaojiu", "taier", "song", "group"]);
   const MAX_REPORT_LOGO_DATA_URL_LENGTH = 3_600_000;
 
@@ -946,6 +989,23 @@ async function startServer() {
     res.json({ user: req.user });
   });
 
+  app.get("/api/report-access/:month", authenticateMiddleware, (req: any, res) => {
+    try {
+      const { month } = req.params;
+      if (!/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ error: "账期格式非法" });
+      }
+      const storage = loadStorage();
+      return res.json({
+        month,
+        ...getReportAccess(req.user, month, storage),
+        status: storage.month_configs?.[month]?._review_status || "editing"
+      });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message || "读取月报权限失败" });
+    }
+  });
+
   // 获取所有账号
   app.get("/api/users", authenticateMiddleware, adminOnlyMiddleware, async (req, res) => {
     try {
@@ -1108,6 +1168,7 @@ async function startServer() {
       const storage = loadStorage();
       if (!storage.month_configs) storage.month_configs = {};
       const currentConfig = storage.month_configs[month] || {};
+      if (!requireReportEditAccess(req, res, month, storage)) return;
       const currentRevision = Number(currentConfig._revision || 0);
       if (!Number.isFinite(baseRevision) || baseRevision !== currentRevision) {
         return res.status(409).json({
@@ -1153,7 +1214,7 @@ async function startServer() {
   });
 
   // 月报最终版快照：完成月报后锁定完整 ReportMetrics + 文本/专项页，历史账期不再受外部数据源回写影响。
-  app.post("/api/report-snapshot/:month/finalize", authenticateMiddleware, (req: any, res) => {
+  app.post("/api/report-snapshot/:month/finalize", authenticateMiddleware, adminOnlyMiddleware, (req: any, res) => {
     try {
       const { month } = req.params;
       const incomingMetrics = req.body?.metrics;
@@ -1313,7 +1374,7 @@ async function startServer() {
     }
   });
 
-  // 月报第 2 页四个品牌 Logo：按账期保存，任何已登录用户都可修改；最终版锁定后随快照冻结。
+  // 月报第 2 页四个品牌 Logo：按账期保存，仅本月撰写人或管理员可修改；最终版锁定后随快照冻结。
   app.get("/api/report-logos/:month", authenticateMiddleware, (req: any, res) => {
     try {
       const { month } = req.params;
@@ -1355,6 +1416,7 @@ async function startServer() {
       const storage = loadStorage();
       if (!storage.month_configs) storage.month_configs = {};
       const config = storage.month_configs[month] || {};
+      if (!requireReportEditAccess(req, res, month, storage)) return;
       if (getSnapshotMeta(config).locked) {
         return res.status(423).json({
           error: "该账期已锁定为最终版，请先解除锁定后再修改月报 Logo。",
@@ -1733,6 +1795,10 @@ echo "=================================================="
       }
 
       const hasClientCommentChanges = !!clientComments && typeof clientComments === "object" && Object.keys(clientComments).length > 0;
+      if ((editingField || hasClientCommentChanges) && !requireReportEditAccess(req, res, month, storage)) {
+        activeEditors.delete(sessionKey);
+        return;
+      }
       if (hasClientCommentChanges) {
         if (getSnapshotMeta(storage.month_configs[month]).locked) {
           return res.status(423).json({
@@ -2072,12 +2138,28 @@ echo "=================================================="
       }
 
       const config = storage.month_configs[targetMonth];
+      if (getSnapshotMeta(config).locked) {
+        return res.status(423).json({
+          error: `账期 ${targetMonth} 已归档为最终版，钉钉自动数据不会再改写该账期。`,
+          snapshot: getSnapshotMeta(config)
+        });
+      }
+
+      let changed = false;
 
       if (curr_renwood_count !== undefined && curr_renwood_count !== null && curr_renwood_count !== "") {
-        config.curr_renwood_count = Number(curr_renwood_count);
+        const nextValue = Number(curr_renwood_count);
+        if (config.curr_renwood_count !== nextValue) {
+          config.curr_renwood_count = nextValue;
+          changed = true;
+        }
       }
       if (curr_new_shops !== undefined && curr_new_shops !== null && curr_new_shops !== "") {
-        config.curr_new_shops = Number(curr_new_shops);
+        const nextValue = Number(curr_new_shops);
+        if (config.curr_new_shops !== nextValue) {
+          config.curr_new_shops = nextValue;
+          changed = true;
+        }
       }
 
       // 自动计算并填充上月指标（作为对比参考）
@@ -2090,11 +2172,26 @@ echo "=================================================="
       const prevMonth = `${prevYearStr}-${prevMonthNumStr}`;
 
       if (storage.month_configs[prevMonth]) {
-        config.prev_renwood_count = storage.month_configs[prevMonth].curr_renwood_count || 0;
-        config.prev_new_shops = storage.month_configs[prevMonth].curr_new_shops || 0;
+        const nextPrevRenovation = storage.month_configs[prevMonth].curr_renwood_count || 0;
+        const nextPrevNewShops = storage.month_configs[prevMonth].curr_new_shops || 0;
+        if (config.prev_renwood_count !== nextPrevRenovation) {
+          config.prev_renwood_count = nextPrevRenovation;
+          changed = true;
+        }
+        if (config.prev_new_shops !== nextPrevNewShops) {
+          config.prev_new_shops = nextPrevNewShops;
+          changed = true;
+        }
       }
 
-      saveStorage(storage);
+      if (changed) {
+        config._revision = Number(config._revision || 0) + 1;
+        config._updated_at = new Date().toISOString();
+        config._updated_by = "dingtalk-webhook";
+        markSnapshotStale(config, "钉钉自动数据已发生更新", "dingtalk-webhook");
+        markWorkingSnapshotStale(config, "钉钉自动数据已更新，请重新生成共享工作版", "dingtalk-webhook");
+        saveStorage(storage);
+      }
       console.log(`[DingTalk Webhook] 成功更新 ${targetMonth} 的开业数据: 翻新=${config.curr_renwood_count}, 新开=${config.curr_new_shops}`);
 
       return res.json({
@@ -2142,16 +2239,19 @@ echo "=================================================="
         storage.month_configs = {};
       }
       const isSubmit = req.body.is_submit === "true";
-      if (isSubmit) {
+      const qiyuFiles = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const hasQiyuUpload = !!(qiyuFiles?.["prev_qiyu_file"]?.[0] || qiyuFiles?.["curr_qiyu_file"]?.[0]);
+      if (isSubmit || hasQiyuUpload) {
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
-          return res.status(401).json({ detail: "保存月报需要登录认证" });
+          return res.status(401).json({ detail: isSubmit ? "保存月报需要登录认证" : "上传七鱼数据需要登录认证" });
         }
         const submitUser = verifyToken(authHeader.substring(7));
         if (!submitUser) {
-          return res.status(419).json({ detail: "登录已过期，请重新登录后保存月报" });
+          return res.status(419).json({ detail: "登录已过期，请重新登录后继续操作" });
         }
         req.user = submitUser;
+        if (!requireReportEditAccess(req, res, month, storage)) return;
       }
       const hasCached = storage.month_configs[month] !== undefined;
       const cachedConfig = hasCached ? storage.month_configs[month] : {};
@@ -2172,9 +2272,9 @@ echo "=================================================="
 
       // 已锁定账期直接返回最终版快照，彻底隔离 RDS/钉钉等历史源后续补单、回写造成的数字漂移。
       if (cachedSnapshotMeta.locked) {
-        if (isSubmit) {
+        if (isSubmit || hasQiyuUpload) {
           return res.status(423).json({
-            detail: "该账期已锁定为最终版。需要修订时，请先由管理员解除最终版锁定。",
+            detail: "该账期已锁定为最终版。需要修订或重新上传七鱼数据时，请先由管理员解除最终版锁定。",
             snapshot: cachedSnapshotMeta
           });
         }

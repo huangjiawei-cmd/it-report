@@ -160,6 +160,8 @@ interface ReportPageProps {
   month: string;
   currentUser?: SystemUser | null;
   registerExportFn?: (fn: () => Promise<void>) => void;
+  canEdit?: boolean;
+  assignedWriter?: string | null;
 }
 
 // 参与多端协同同步的全部字段清单（脏数据追踪与卸载补发共用）
@@ -288,11 +290,14 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   metrics,
   month,
   currentUser,
-  registerExportFn
+  registerExportFn,
+  canEdit = false,
+  assignedWriter = null
 }) => {
   const isPdf = useContext(PdfContext);
   const snapshotMeta = metrics.snapshot_meta;
   const snapshotLocked = !!snapshotMeta?.locked;
+  const reportReadOnly = snapshotLocked || !canEdit;
   const [snapshotActionBusy, setSnapshotActionBusy] = useState(false);
   const [snapshotActionError, setSnapshotActionError] = useState<string | null>(null);
   const [reportLogos, setReportLogos] = useState<Partial<Record<ReportLogoId, string>>>({});
@@ -331,7 +336,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   }, [month, currentUser, snapshotLocked]);
 
   const saveReportLogo = async (brandId: ReportLogoId, base64: string) => {
-    if (snapshotLocked || reportLogoBusy) return;
+    if (reportReadOnly || reportLogoBusy) return;
     setReportLogoBusy(brandId);
     setReportLogoError(null);
     try {
@@ -745,9 +750,9 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   }, [month, currentUser, snapshotLocked]);
 
   const handleFinalizeSnapshot = async () => {
-    if (snapshotActionBusy || snapshotLocked) return;
+    if (snapshotActionBusy || snapshotLocked || currentUser?.role !== "管理员") return;
     const confirmed = window.confirm(
-      `确定将 ${month} 当前页面显示内容锁定为“最终版”吗？\n\n锁定后，新电脑会读取这一份固定快照，RDS、钉钉等历史源后续变化不会再改变该账期。`
+      `确认 ${month} 月报已完成经理审阅并正式归档吗？\n\n归档后，新电脑会固定读取这一份最终版，RDS、钉钉等历史源后续变化不会再改变该账期。`
     );
     if (!confirmed) return;
 
@@ -795,11 +800,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         body: JSON.stringify({ metrics: metricsForSnapshot, comments })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "最终版锁定失败");
-      window.alert(`已锁定 ${month} 最终版。快照编号：${data.snapshot?.snapshotId || "已生成"}`);
+      if (!res.ok) throw new Error(data.error || "最终版归档失败");
+      window.alert(`已归档 ${month} 最终版。快照编号：${data.snapshot?.snapshotId || "已生成"}`);
       window.location.reload();
     } catch (e: any) {
-      setSnapshotActionError(e.message || "最终版锁定失败");
+      setSnapshotActionError(e.message || "最终版归档失败");
     } finally {
       setSnapshotActionBusy(false);
     }
@@ -1198,7 +1203,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
           totalPages={totalSlides}
           onUpdate={(updated) => handleUpdateProjectSlide(pSlide.id, updated)}
           onDelete={() => handleDeleteProjectSlide(pSlide.id)}
-          readOnly={snapshotLocked}
+          readOnly={reportReadOnly}
         />
       );
     }
@@ -1264,9 +1269,9 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                       <label
                         key={brand.id}
                         className={`group relative border border-slate-150 rounded-2xl p-3 h-[145px] flex items-center justify-center bg-slate-50/50 transition-all shadow-xs overflow-hidden ${
-                          !isPdf && !snapshotLocked ? "hover:bg-slate-50 hover:border-indigo-300 cursor-pointer" : ""
+                          !isPdf && !reportReadOnly ? "hover:bg-slate-50 hover:border-indigo-300 cursor-pointer" : ""
                         }`}
-                        title={!isPdf && !snapshotLocked ? `点击替换 ${brand.name} Logo` : brand.name}
+                        title={!isPdf && !reportReadOnly ? `点击替换 ${brand.name} Logo` : brand.name}
                       >
                         {!failedLogos[brand.id] ? (
                           <img
@@ -1283,7 +1288,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                           </div>
                         )}
 
-                        {!isPdf && !snapshotLocked && (
+                        {!isPdf && !reportReadOnly && (
                           <>
                             <input
                               type="file"
@@ -1359,12 +1364,12 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                             }}
                             fieldKey={`slide2Bullet_${idx}`}
                             activeEditors={activeEditors}
-                            readOnly={snapshotLocked}
+                            readOnly={reportReadOnly}
                             className="hover:bg-amber-50/50 px-2 py-0.5 rounded transition duration-150 cursor-text outline-none focus:bg-amber-50 focus:ring-1 focus:ring-amber-300 w-full block"
                             isBullet={true}
                           />
                         </div>
-                        {!isPdf && !snapshotLocked && (
+                        {!isPdf && !reportReadOnly && (
                           <button
                             type="button"
                             onClick={() => {
@@ -1564,7 +1569,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   }}
                   fieldKey="slide4Comment"
                   activeEditors={activeEditors}
-                  readOnly={snapshotLocked}
+                  readOnly={reportReadOnly}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1731,7 +1736,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   }}
                   fieldKey="slide5Comment"
                   activeEditors={activeEditors}
-                  readOnly={snapshotLocked}
+                  readOnly={reportReadOnly}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1840,7 +1845,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   }}
                   fieldKey="slide6Comment"
                   activeEditors={activeEditors}
-                  readOnly={snapshotLocked}
+                  readOnly={reportReadOnly}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -1952,7 +1957,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   }}
                   fieldKey="slide7Comment"
                   activeEditors={activeEditors}
-                  readOnly={snapshotLocked}
+                  readOnly={reportReadOnly}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -2024,7 +2029,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   }}
                   fieldKey="slide8Comment"
                   activeEditors={activeEditors}
-                  readOnly={snapshotLocked}
+                  readOnly={reportReadOnly}
                   className="editable-commentary p-4 bg-slate-50 border border-dashed border-slate-200 hover:border-indigo-300 text-xs text-slate-700 rounded-xl leading-relaxed cursor-text outline-none transition-colors focus:bg-amber-50/30 focus:border-indigo-400 shadow-3xs"
                   style={{ fontFamily: '"Inter", "PingFang SC", "Lantinghei SC", "Helvetica Neue", "Microsoft YaHei", sans-serif' }}
                   isBullet={false}
@@ -2114,12 +2119,17 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                 {snapshotLocked
                   ? `快照 ${snapshotMeta?.snapshotId || "已建立"} · ${snapshotMeta?.finalizedBy || "未知用户"} · ${snapshotMeta?.finalizedAt ? new Date(snapshotMeta.finalizedAt).toLocaleString() : "时间未记录"}。新电脑读取同一固定快照。`
                   : snapshotMeta?.workingExists
-                    ? `生成者 ${snapshotMeta.workingGeneratedBy || "未知用户"} · ${snapshotMeta.workingGeneratedAt ? new Date(snapshotMeta.workingGeneratedAt).toLocaleString() : "时间未记录"}。所有电脑打开该账期都会读取这份服务器工作版。`
-                    : "首次点击“一键生成 IT 运维月报”后，服务器会建立共享工作版；此后所有电脑读取同一份预览。"}
+                    ? `本月负责人 ${assignedWriter || "未指定"} · 工作版生成者 ${snapshotMeta.workingGeneratedBy || "未知用户"} · ${snapshotMeta.workingGeneratedAt ? new Date(snapshotMeta.workingGeneratedAt).toLocaleString() : "时间未记录"}。负责人和管理员看到同一份服务器工作版。`
+                    : `本月负责人 ${assignedWriter || "未指定"}。首次由负责人或管理员点击“一键生成 IT 运维月报”后，服务器会建立共享工作版。`}
               </div>
+              {!snapshotLocked && !canEdit && (
+                <div className="mt-2 text-[11px] text-slate-600 font-semibold bg-white/70 border border-slate-200 rounded-lg px-2.5 py-1.5">
+                  当前账号为只读。该账期由 {assignedWriter || "指定撰写人"} 负责，管理员可在完成后进入同一页面微调并审阅。
+                </div>
+              )}
               {snapshotMeta?.workingExists && snapshotMeta?.workingStale && !snapshotLocked && (
                 <div className="mt-2 text-[11px] text-amber-700 font-semibold bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-                  填报字段已更新，当前仍固定显示上一次共享工作版。请由任一主管重新点击“一键生成”，更新所有人的共享预览。
+                  填报字段已更新，当前仍固定显示上一次共享工作版。请由本月负责人或管理员重新点击“一键生成”，更新所有人的共享预览。
                   {snapshotMeta.workingStaleReason ? ` 原因：${snapshotMeta.workingStaleReason}` : ""}
                 </div>
               )}
@@ -2141,7 +2151,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
               )}
             </div>
             <div className="flex items-center gap-2 flex-none">
-              {!snapshotLocked && (
+              {!snapshotLocked && currentUser?.role === "管理员" && (
                 <button
                   type="button"
                   disabled={snapshotActionBusy || !!snapshotMeta?.workingStale}
@@ -2149,10 +2159,10 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   className="px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white shadow-xs cursor-pointer"
                 >
                   {snapshotActionBusy
-                    ? "正在锁定..."
+                    ? "正在归档..."
                     : snapshotMeta?.workingStale
                       ? "请先重新生成工作版"
-                      : "锁定当前显示为最终版"}
+                      : "确认归档为最终版"}
                 </button>
               )}
               {snapshotLocked && currentUser?.role === "管理员" && (
@@ -2214,7 +2224,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
               </button>
             </div>
 
-            {!snapshotLocked && (
+            {!reportReadOnly && (
               <button
                 onClick={handleAddProjectSlide}
                 className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs flex items-center gap-1.5 cursor-pointer hover:shadow-md active:scale-95"
@@ -2240,7 +2250,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
               <span className="text-[11px] text-slate-400 font-mono hidden md:inline">
                 例如：把 09 拖到第二页下面，序号与右上角 PAGE 即自动变 03
               </span>
-              {!snapshotLocked && (
+              {!reportReadOnly && (
                 <button
                   type="button"
                   onClick={handleResetSlideOrder}
@@ -2261,10 +2271,10 @@ export const ReportPage: React.FC<ReportPageProps> = ({
               return (
                 <div
                   key={item.id}
-                  draggable={!snapshotLocked}
-                  onDragStart={snapshotLocked ? undefined : (e) => handleDragStart(e, idx)}
-                  onDragOver={snapshotLocked ? undefined : handleDragOver}
-                  onDrop={snapshotLocked ? undefined : (e) => handleDrop(e, idx)}
+                  draggable={!reportReadOnly}
+                  onDragStart={reportReadOnly ? undefined : (e) => handleDragStart(e, idx)}
+                  onDragOver={reportReadOnly ? undefined : handleDragOver}
+                  onDrop={reportReadOnly ? undefined : (e) => handleDrop(e, idx)}
                   onClick={() => setCurrentSlideIndex(idx)}
                   className={`flex-none flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-sans transition-all select-none cursor-grab active:cursor-grabbing ${
                     isDragging
@@ -2285,7 +2295,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   </span>
 
                   {/* Micro step arrows for accessibility & precise move */}
-                  {!snapshotLocked && <div className="flex items-center gap-0.5 ml-1 opacity-70 hover:opacity-100">
+                  {!reportReadOnly && <div className="flex items-center gap-0.5 ml-1 opacity-70 hover:opacity-100">
                     <button
                       type="button"
                       disabled={idx === 0}
