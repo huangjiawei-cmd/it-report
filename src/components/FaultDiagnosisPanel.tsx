@@ -5,7 +5,6 @@ import { ReportMetrics } from "../types";
 interface FaultDiagnosisPanelProps {
   month: string;
   currQiyuFile: File | null;
-  prevQiyuFile: File | null;
   currBoh: Record<string, Record<string, number>>;
   prevBoh: Record<string, Record<string, number>>;
   currBackup4g: number;
@@ -23,7 +22,6 @@ interface FaultDiagnosisPanelProps {
 export const FaultDiagnosisPanel: React.FC<FaultDiagnosisPanelProps> = ({
   month,
   currQiyuFile,
-  prevQiyuFile,
   currBoh,
   prevBoh,
   currBackup4g,

@@ -45,6 +45,33 @@ import { FaultDiagnosisPanel } from "./components/FaultDiagnosisPanel";
 import { BrandCollisionChamber } from "./components/BrandCollisionChamber";
 import { LogoCustomizer } from "./components/LogoCustomizer";
 
+const QIYU_CATEGORY_KEYS = [
+  "菜品上下架调整",
+  "请求提供数据",
+  "电脑与软件问题",
+  "POS/KVS问题",
+  "打印机出单调整",
+  "优惠券及键位问题",
+  "网络问题"
+] as const;
+
+type QiyuCategoryKey = typeof QIYU_CATEGORY_KEYS[number];
+type QiyuCategoryMap = Record<QiyuCategoryKey, number>;
+
+const createEmptyQiyuCategoryMap = (): QiyuCategoryMap => Object.fromEntries(
+  QIYU_CATEGORY_KEYS.map((key) => [key, 0])
+) as QiyuCategoryMap;
+
+const normalizeQiyuCategoryMap = (value: any): QiyuCategoryMap => {
+  const result = createEmptyQiyuCategoryMap();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  for (const key of QIYU_CATEGORY_KEYS) {
+    const parsed = Number(value[key] ?? 0);
+    result[key] = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+  }
+  return result;
+};
+
 export default function App() {
   const loginCardRef = useRef<HTMLDivElement>(null);
   // 1. 系统用户和权限状态管理
@@ -167,6 +194,7 @@ export default function App() {
     prevNewShops: any;
     currBoh: any;
     prevBoh: any;
+    dingtalkQiyuSupplement: string;
   } | null>(null);
 
   // 选项卡状态 (config: 数据录入, preview: 月报预览, users: 账号管理, system: 系统健康与运维)
@@ -669,8 +697,13 @@ export default function App() {
   const [currNewShops, setCurrNewShops] = useState<number | string>(() => getInitialDraft("curr_new_shops", 2));
 
   // 4. 客服会话 Excel 文件上传状态
-  const [prevQiyuFile, setPrevQiyuFile] = useState<File | null>(null);
   const [currQiyuFile, setCurrQiyuFile] = useState<File | null>(null);
+  const [dingtalkQiyuSupplement, setDingtalkQiyuSupplement] = useState<QiyuCategoryMap>(() => createEmptyQiyuCategoryMap());
+
+  // 七鱼文件严格绑定当前账期；切换月份时清空选择，避免误把上一个月的文件提交到新账期。
+  useEffect(() => {
+    setCurrQiyuFile(null);
+  }, [month]);
 
   // 5. 核心计算与渲染大盘状态
   const [metrics, setMetrics] = useState<ReportMetrics | null>(null);
@@ -695,6 +728,7 @@ export default function App() {
   const sharedBaselineRef = useRef<{ month: string; config: Record<string, any>; revision: number } | null>(null);
   const sharedSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sharedSaveSequenceRef = useRef(0);
+  const sharedSaveInFlightRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     if (!isAuthenticated || !currentUser || !/^\d{4}-\d{2}$/.test(month)) {
@@ -795,6 +829,38 @@ export default function App() {
     }
   };
 
+  const getQiyuBaseCategoryValue = (key: QiyuCategoryKey) => {
+    const explicitRaw = metrics?.current_qiyu_categories?.[key];
+    if (explicitRaw !== undefined) return Number(explicitRaw || 0);
+    const combined = Number(metrics?.current_categories?.[key] || 0);
+    const metricSupplement = Number(metrics?.current_dingtalk_qiyu_supplement?.[key] || 0);
+    return Math.max(0, combined - metricSupplement);
+  };
+
+  const handleDingtalkQiyuSupplementChange = (key: QiyuCategoryKey, rawValue: string) => {
+    const parsed = Number(rawValue);
+    const safeValue = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+    setDingtalkQiyuSupplement((prev) => ({ ...prev, [key]: safeValue }));
+  };
+
+  const getServiceDeskFormulaPreview = () => {
+    const qiyu = metrics?.current_qiyu_raw;
+    const qiyuTotal = Number(qiyu?.total || 0);
+    const dingtalkTotal = Number(currDingTalkSessions || 0);
+    const ratio = qiyuTotal > 0
+      ? Math.round((((dingtalkTotal / qiyuTotal) + Number.EPSILON) * 100)) / 100
+      : 0;
+    const factor = Math.round(((1 + ratio) + Number.EPSILON) * 100) / 100;
+    return {
+      factor,
+      total: Math.round(qiyuTotal + dingtalkTotal),
+      valid: Math.round(Number(qiyu?.valid || 0) * factor),
+      invalid: Math.round(Number(qiyu?.invalid || 0) * factor),
+      unreplied: Math.round(Number(qiyu?.unreplied || 0) * factor)
+    };
+  };
+  const serviceDeskFormulaPreview = getServiceDeskFormulaPreview();
+
   // 7. 一键调用全栈数据管道进行清洗汇总
   const handleGenerateReport = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -805,6 +871,15 @@ export default function App() {
     if (!canEditMonth) {
       setError(`当前账期由 ${reportAccess?.assignedWriter || "指定撰写人"} 负责，当前账号仅可查看。`);
       return;
+    }
+
+    // 避免“刚输入完就点生成”时，0.8 秒共享草稿自动保存和生成请求同时竞争 revision。
+    if (sharedSaveTimerRef.current) {
+      clearTimeout(sharedSaveTimerRef.current);
+      sharedSaveTimerRef.current = null;
+    }
+    if (sharedSaveInFlightRef.current) {
+      await sharedSaveInFlightRef.current;
     }
     setLoading(true);
     setError(null);
@@ -821,14 +896,12 @@ export default function App() {
     formData.append("prev_new_shops", String(prevNewShops));
     formData.append("curr_boh_json", JSON.stringify(currBoh));
     formData.append("prev_boh_json", JSON.stringify(prevBoh));
+    formData.append("dingtalk_qiyu_supplement_json", JSON.stringify(dingtalkQiyuSupplement));
     formData.append("is_submit", "true");
     if (sharedBaselineRef.current?.month === month) {
       formData.append("base_revision", String(sharedBaselineRef.current.revision));
     }
 
-    if (prevQiyuFile) {
-      formData.append("prev_qiyu_file", prevQiyuFile);
-    }
     if (currQiyuFile) {
       formData.append("curr_qiyu_file", currQiyuFile);
     }
@@ -919,6 +992,9 @@ export default function App() {
           if (cfg.curr_new_shops !== undefined) setCurrNewShops(cfg.curr_new_shops);
           if (cfg.prev_renwood_count !== undefined) setPrevRenovation(cfg.prev_renwood_count);
           if (cfg.prev_new_shops !== undefined) setPrevNewShops(cfg.prev_new_shops);
+          if (cfg.dingtalk_qiyu_supplement !== undefined) {
+            setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement));
+          }
           if (cfg.curr_boh_data !== undefined) setCurrBoh(cfg.curr_boh_data);
           if (cfg.prev_boh_data !== undefined) setPrevBoh(cfg.prev_boh_data);
         }
@@ -942,6 +1018,9 @@ export default function App() {
       if (resData.metrics.current_new_shops !== undefined) setCurrNewShops(resData.metrics.current_new_shops);
       if (resData.metrics.compare_month_renovation_count !== undefined) setPrevRenovation(resData.metrics.compare_month_renovation_count);
       if (resData.metrics.compare_month_new_shops !== undefined) setPrevNewShops(resData.metrics.compare_month_new_shops);
+      if (resData.metrics.current_dingtalk_qiyu_supplement !== undefined) {
+        setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(resData.metrics.current_dingtalk_qiyu_supplement));
+      }
       if (resData.metrics.curr_boh_data) setCurrBoh(resData.metrics.curr_boh_data);
       if (resData.metrics.prev_boh_data) setPrevBoh(resData.metrics.prev_boh_data);
       stateMonthRef.current = month;
@@ -1179,6 +1258,10 @@ export default function App() {
     formData.append("curr_new_shops", getDraftStr("curr_new_shops", "2"));
     formData.append("prev_renwood_count", getDraftStr("prev_renwood_count", "0"));
     formData.append("prev_new_shops", getDraftStr("prev_new_shops", "2"));
+    formData.append(
+      "dingtalk_qiyu_supplement_json",
+      getDraftStr("dingtalk_qiyu_supplement", JSON.stringify(createEmptyQiyuCategoryMap()))
+    );
 
     const defaultPrevBoh = {
       "太二": { "堂食": 3816, "外卖": 2144, "营销活动": 317 },
@@ -1365,12 +1448,16 @@ export default function App() {
     const currRenwoodVal = getDraft(targetMonth, "curr_renwood_count", defaultCurrRenwood);
     const currNewShopsVal = getDraft(targetMonth, "curr_new_shops", defaultCurrNewShops);
     const currBohVal = getDraft(targetMonth, "curr_boh", defaultCurrBoh);
+    const dingtalkQiyuSupplementVal = normalizeQiyuCategoryMap(
+      getDraft(targetMonth, "dingtalk_qiyu_supplement", createEmptyQiyuCategoryMap())
+    );
 
     setCurrBackup4g(currBackup4gVal);
     setCurrDingTalkSessions(currDingTalkVal);
     setCurrRenovation(currRenwoodVal);
     setCurrNewShops(currNewShopsVal);
     setCurrBoh(currBohVal);
+    setDingtalkQiyuSupplement(dingtalkQiyuSupplementVal);
 
     setLoadedMonth(targetMonth);
     stateMonthRef.current = targetMonth;
@@ -1385,7 +1472,8 @@ export default function App() {
       curr_renwood_count: currRenwoodVal,
       curr_new_shops: currNewShopsVal,
       prev_renwood_count: prevRenwoodVal,
-      prev_new_shops: prevNewShopsVal
+      prev_new_shops: prevNewShopsVal,
+      dingtalk_qiyu_supplement: dingtalkQiyuSupplementVal
     };
   }, []);
 
@@ -1427,6 +1515,7 @@ export default function App() {
               curr_new_shops: cfg.curr_new_shops !== undefined ? cfg.curr_new_shops : "",
               prev_renwood_count: cfg.prev_renwood_count !== undefined ? cfg.prev_renwood_count : "",
               prev_new_shops: cfg.prev_new_shops !== undefined ? cfg.prev_new_shops : "",
+              dingtalk_qiyu_supplement: normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement || {}),
               curr_boh: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : emptyBoh,
               prev_boh: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : emptyBoh
             };
@@ -1447,6 +1536,7 @@ export default function App() {
         curr_new_shops: mergedDrafts.curr_new_shops,
         prev_renwood_count: mergedDrafts.prev_renwood_count,
         prev_new_shops: mergedDrafts.prev_new_shops,
+        dingtalk_qiyu_supplement: normalizeQiyuCategoryMap(mergedDrafts.dingtalk_qiyu_supplement || {}),
         curr_boh_data: mergedDrafts.curr_boh,
         prev_boh_data: mergedDrafts.prev_boh
       };
@@ -1468,6 +1558,7 @@ export default function App() {
       setCurrRenovation(mergedDrafts.curr_renwood_count);
       setCurrNewShops(mergedDrafts.curr_new_shops);
       setCurrBoh(mergedDrafts.curr_boh);
+      setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(mergedDrafts.dingtalk_qiyu_supplement || {}));
       setLoadedMonth(month);
       stateMonthRef.current = month;
 
@@ -1500,6 +1591,7 @@ export default function App() {
       localStorage.setItem(`draft_${month}_prev_new_shops`, String(prevNewShops));
       localStorage.setItem(`draft_${month}_curr_renwood_count`, String(currRenovation));
       localStorage.setItem(`draft_${month}_curr_new_shops`, String(currNewShops));
+      localStorage.setItem(`draft_${month}_dingtalk_qiyu_supplement`, JSON.stringify(dingtalkQiyuSupplement));
 
       // 多人共享草稿：初始化完成后仅上传真正发生变化的字段，页面打开/刷新不会全量回写。
       if (isAuthenticated && canEditMonth && sharedHydratedMonthRef.current === month) {
@@ -1512,6 +1604,7 @@ export default function App() {
           curr_new_shops: currNewShops,
           prev_renwood_count: prevRenovation,
           prev_new_shops: prevNewShops,
+          dingtalk_qiyu_supplement: dingtalkQiyuSupplement,
           curr_boh_data: currBoh,
           prev_boh_data: prevBoh
         };
@@ -1557,6 +1650,9 @@ export default function App() {
                 if (cfg.curr_new_shops !== undefined) setCurrNewShops(cfg.curr_new_shops);
                 if (cfg.prev_renwood_count !== undefined) setPrevRenovation(cfg.prev_renwood_count);
                 if (cfg.prev_new_shops !== undefined) setPrevNewShops(cfg.prev_new_shops);
+                if (cfg.dingtalk_qiyu_supplement !== undefined) {
+                  setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement));
+                }
                 if (cfg.curr_boh_data !== undefined) setCurrBoh(cfg.curr_boh_data);
                 if (cfg.prev_boh_data !== undefined) setPrevBoh(cfg.prev_boh_data);
                 setError("检测到其他主管已更新当前账期，已自动加载服务器最新值。请确认后继续编辑。");
@@ -1583,7 +1679,16 @@ export default function App() {
             }
           };
 
-          sharedSaveTimerRef.current = setTimeout(() => persistPatch(), 800);
+          sharedSaveTimerRef.current = setTimeout(() => {
+            sharedSaveTimerRef.current = null;
+            const pending = persistPatch();
+            sharedSaveInFlightRef.current = pending;
+            pending.finally(() => {
+              if (sharedSaveInFlightRef.current === pending) {
+                sharedSaveInFlightRef.current = null;
+              }
+            });
+          }, 800);
         }
       }
     }
@@ -1602,7 +1707,8 @@ export default function App() {
     prevRenovation,
     prevNewShops,
     currRenovation,
-    currNewShops
+    currNewShops,
+    dingtalkQiyuSupplement
   ]);
 
   // 9.7. 审计日志：手动修改账期核心数据增量监听器
@@ -1622,7 +1728,8 @@ export default function App() {
         prevRenovation,
         prevNewShops,
         currBoh: JSON.stringify(currBoh),
-        prevBoh: JSON.stringify(prevBoh)
+        prevBoh: JSON.stringify(prevBoh),
+        dingtalkQiyuSupplement: JSON.stringify(dingtalkQiyuSupplement)
       };
       return;
     }
@@ -1662,6 +1769,19 @@ export default function App() {
       if (JSON.stringify(prevBoh) !== prevVal.prevBoh) {
         changes.push(`上期BOH核心数据有更新`);
       }
+      const currentSupplementJson = JSON.stringify(dingtalkQiyuSupplement);
+      if (currentSupplementJson !== prevVal.dingtalkQiyuSupplement) {
+        try {
+          const previousSupplement = normalizeQiyuCategoryMap(JSON.parse(prevVal.dingtalkQiyuSupplement || "{}"));
+          for (const key of QIYU_CATEGORY_KEYS) {
+            if (previousSupplement[key] !== dingtalkQiyuSupplement[key]) {
+              changes.push(`钉钉补充-${key}: ${previousSupplement[key]} -> ${dingtalkQiyuSupplement[key]}`);
+            }
+          }
+        } catch (e) {
+          changes.push("钉钉群会话补充数据有更新");
+        }
+      }
 
       if (changes.length > 0) {
         addAuditLog(
@@ -1681,7 +1801,8 @@ export default function App() {
           prevRenovation,
           prevNewShops,
           currBoh: JSON.stringify(currBoh),
-          prevBoh: JSON.stringify(prevBoh)
+          prevBoh: JSON.stringify(prevBoh),
+          dingtalkQiyuSupplement: JSON.stringify(dingtalkQiyuSupplement)
         };
       }
     }, 3000); // 3秒防抖防洪，减少写日志频率
@@ -1700,6 +1821,7 @@ export default function App() {
     prevNewShops,
     currBoh,
     prevBoh,
+    dingtalkQiyuSupplement,
     isAuthenticated,
     currentUser,
     addAuditLog
@@ -1970,7 +2092,6 @@ export default function App() {
           <FaultDiagnosisPanel
             month={month}
             currQiyuFile={currQiyuFile}
-            prevQiyuFile={prevQiyuFile}
             currBoh={currBoh}
             prevBoh={prevBoh}
             currBackup4g={currBackup4g}
@@ -2140,7 +2261,7 @@ export default function App() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-600 mb-1.5">💬 钉钉会话数 (上月):</label>
+                  <label className="block text-xs font-bold text-slate-600 mb-1.5">💬 钉钉会话总数 (上月):</label>
                   <input
                     type="number"
                     value={prevDingTalkSessions}
@@ -2225,22 +2346,13 @@ export default function App() {
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-600 mb-1.5">📡 4G 备用宽带网络接管次数 (当月):</label>
                   <input
                     type="number"
                     value={currBackup4g}
                     onChange={(e) => setCurrBackup4g(Number(e.target.value))}
-                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white transition shadow-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-600 mb-1.5">💬 钉钉会话数 (当月):</label>
-                  <input
-                    type="number"
-                    value={currDingTalkSessions}
-                    onChange={(e) => setCurrDingTalkSessions(Number(e.target.value))}
                     className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white transition shadow-xs"
                   />
                 </div>
@@ -2384,28 +2496,30 @@ export default function App() {
             <div className="flex items-center space-x-2.5 border-b border-slate-200 pb-3 mb-4">
               <UploadCloud className="h-5 w-5 text-slate-500" />
               <div>
-                <h3 className="text-xs font-bold text-slate-700">2. 七鱼客服数据上传</h3>
-                <p className="text-[10px] text-slate-400">支持上传原始导出的 .xlsx 表格，数据自动保存然后自动生成。</p>
+                <h3 className="text-xs font-bold text-slate-700">2. 线上会话数据（七鱼 + 钉钉）</h3>
+                <p className="text-[10px] text-slate-400">每个账期只上传当月七鱼 .xlsx，并填写当月钉钉会话总数；系统自动合并为线上会话。上月数据由服务器历史版本继承。</p>
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              
               <div className="flex flex-col">
-                <label className="text-[11px] font-bold text-slate-500 mb-1.5">📥 上月七鱼原始 Excel 会话总表:</label>
-                <div className="relative">
-                  <input
-                    type="file"
-                    accept=".xlsx"
-                    onChange={(e) => setPrevQiyuFile(e.target.files?.[0] || null)}
-                    className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-[11px] file:font-bold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 file:cursor-pointer border border-slate-200 p-1.5 rounded-xl bg-white shadow-xs focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                  />
-                  {prevQiyuFile && <span className="absolute right-3.5 top-3 text-[10px] text-emerald-600 font-semibold">✓ 已就绪</span>}
+                <label className="text-[11px] font-bold text-slate-500 mb-1.5">🗂 上月七鱼历史基准:</label>
+                <div className="min-h-[46px] rounded-xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5 shadow-xs">
+                  <div className="text-[11px] font-bold text-emerald-800">
+                    {metrics?.prev_month_label || "上月"}数据由服务器自动继承
+                  </div>
+                  <div className="text-[10px] text-emerald-700/80 mt-0.5">
+                    {Number(metrics?.compare_qiyu_raw?.total || 0) > 0
+                      ? `已加载 ${metrics?.compare_qiyu_raw?.total} 条会话历史数据，无需再次上传。`
+                      : "当前尚未找到上月七鱼历史数据；请先确认上月账期已经生成。"}
+                  </div>
                 </div>
               </div>
 
               <div className="flex flex-col">
-                <label className="text-[11px] font-bold text-slate-500 mb-1.5">📥 当月七鱼原始 Excel 会话总表:</label>
+                <label className="text-[11px] font-bold text-slate-500 mb-1.5">
+                  📥 上传{metrics?.curr_month_label || `${Number(month.split("-")[1])}月`}七鱼原始 Excel 会话总表:
+                </label>
                 <div className="relative">
                   <input
                     type="file"
@@ -2417,6 +2531,110 @@ export default function App() {
                 </div>
               </div>
 
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px]">
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                <div className="text-slate-400 mb-1">七鱼会话总数</div>
+                <div className="font-mono font-bold text-slate-700">
+                  {currQiyuFile ? "待解析" : Number(metrics?.current_qiyu_raw?.total || 0).toLocaleString()}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                <div className="text-slate-400 mb-1">钉钉会话总数</div>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={currDingTalkSessions}
+                  onChange={(e) => setCurrDingTalkSessions(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50/60 px-2 py-1.5 text-center font-mono font-bold text-slate-700 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10"
+                />
+              </div>
+              <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 px-3 py-2.5">
+                <div className="text-indigo-500 mb-1">线上会话总数</div>
+                <div className="font-mono font-bold text-indigo-700">
+                  {currQiyuFile
+                    ? "生成后自动计算"
+                    : (Number(metrics?.current_qiyu_raw?.total || 0) + Number(currDingTalkSessions || 0)).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* DINGTALK MANUAL CATEGORY SUPPLEMENT */}
+          <div className="bg-slate-50/50 rounded-2xl p-6 border border-slate-200/80 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-200 pb-3 mb-4">
+              <div className="flex items-center space-x-2.5">
+                <Edit3 className="h-5 w-5 text-indigo-500" />
+                <div>
+                  <h3 className="text-xs font-bold text-slate-700">3. 钉钉群会话补充</h3>
+                  <p className="text-[10px] text-slate-400">
+                    填写钉钉群会话总结中的额外分类数量。报表最终值 = 七鱼原始分类 + 钉钉补充，七鱼原始数据保持不变。
+                  </p>
+                </div>
+              </div>
+              <div className="text-[10px] text-slate-500 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 self-start sm:self-auto">
+                {currQiyuFile ? "已选择新七鱼文件，点击生成后更新七鱼原始值" : "七鱼原始列显示最近一次服务器解析值"}
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+              <div className="min-w-[640px]">
+                <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.8fr] bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-500">
+                  <div className="px-4 py-2.5">咨询分类</div>
+                  <div className="px-3 py-2.5 text-center">七鱼原始</div>
+                  <div className="px-3 py-2.5 text-center">钉钉补充</div>
+                  <div className="px-3 py-2.5 text-center">报表合计</div>
+                </div>
+                {QIYU_CATEGORY_KEYS.map((key) => {
+                  const qiyuValue = getQiyuBaseCategoryValue(key);
+                  const supplementValue = dingtalkQiyuSupplement[key] || 0;
+                  const combinedValue = qiyuValue + supplementValue;
+                  return (
+                    <div
+                      key={key}
+                      className="grid grid-cols-[1.5fr_0.8fr_1fr_0.8fr] items-center border-b border-slate-100 last:border-b-0 text-xs"
+                    >
+                      <div className="px-4 py-2.5 font-semibold text-slate-700">{key}</div>
+                      <div className="px-3 py-2.5 text-center font-mono text-slate-500">{qiyuValue}</div>
+                      <div className="px-3 py-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          inputMode="numeric"
+                          value={supplementValue}
+                          onChange={(e) => handleDingtalkQiyuSupplementChange(key, e.target.value)}
+                          className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-center font-mono text-xs text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 disabled:bg-slate-100 disabled:text-slate-400"
+                          aria-label={`${key}钉钉群补充数量`}
+                        />
+                      </div>
+                      <div className="px-3 py-2.5 text-center font-mono font-bold text-indigo-700">{combinedValue}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-slate-400">
+              <span>仅填写非负整数；没有补充时保持 0。</span>
+              <span>修改后约 0.8 秒自动保存服务器，重新生成月报后进入图表。</span>
+              <span>上月图表对比值继承上月已生成/归档的合计口径。</span>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-indigo-100 bg-indigo-50/30 px-4 py-3">
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[10px] text-slate-500">
+                <span className="font-bold text-indigo-700">门店服务台公式预览</span>
+                <span>修正系数：{currQiyuFile ? "生成后计算" : serviceDeskFormulaPreview.factor.toFixed(2)}</span>
+                <span>线上会话：{currQiyuFile ? "生成后计算" : serviceDeskFormulaPreview.total.toLocaleString()}</span>
+                <span>有效：{currQiyuFile ? "生成后计算" : serviceDeskFormulaPreview.valid.toLocaleString()}</span>
+                <span>无效：{currQiyuFile ? "生成后计算" : serviceDeskFormulaPreview.invalid.toLocaleString()}</span>
+                <span>未回复：{currQiyuFile ? "生成后计算" : serviceDeskFormulaPreview.unreplied.toLocaleString()}</span>
+              </div>
+              <div className="mt-1.5 text-[9px] text-slate-400">
+                系数 = 1 + 四舍五入(钉钉会话总数 ÷ 七鱼会话总数, 2位)；有效/无效/未回复分别乘系数后四舍五入为整数。
+              </div>
             </div>
           </div>
 

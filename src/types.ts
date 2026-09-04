@@ -129,8 +129,34 @@ export interface ReportMetrics {
   compare_month_qiyu_valid: number;
   current_qiyu_raw: QiyuRaw;
   compare_qiyu_raw: QiyuRaw;
+  current_qiyu_categories?: Record<string, number>;
+  compare_qiyu_categories?: Record<string, number>;
+  current_dingtalk_qiyu_supplement?: Record<string, number>;
+  compare_dingtalk_qiyu_supplement?: Record<string, number>;
   current_categories: Record<string, number>;
   compare_categories: Record<string, number>;
+  current_online_sessions?: number;
+  compare_online_sessions?: number;
+  current_service_desk_volume?: {
+    total: number;
+    valid: number;
+    invalid: number;
+    unreplied: number;
+    factor: number;
+    dingtalk_ratio: number;
+    qiyu_total: number;
+    dingtalk_total: number;
+  };
+  compare_service_desk_volume?: {
+    total: number;
+    valid: number;
+    invalid: number;
+    unreplied: number;
+    factor: number;
+    dingtalk_ratio: number;
+    qiyu_total: number;
+    dingtalk_total: number;
+  };
   curr_boh_data: BohData;
   prev_boh_data: BohData;
   ticket_brand_distribution: Record<string, number>;

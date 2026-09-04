@@ -496,6 +496,9 @@ async function startServer() {
             if (!parsed.custom_logos || typeof parsed.custom_logos !== "object") {
               parsed.custom_logos = {};
             }
+            if (!parsed.report_settings || typeof parsed.report_settings !== "object") {
+              parsed.report_settings = {};
+            }
             return parsed;
           }
         }
@@ -503,7 +506,7 @@ async function startServer() {
     } catch (e) {
       console.error("加载本地存储失败:", e);
     }
-    return { qiyu_cache: {}, month_configs: {}, custom_logos: {} };
+    return { qiyu_cache: {}, month_configs: {}, custom_logos: {}, report_settings: {} };
   }
 
   function saveStorage(data: any) {
@@ -532,7 +535,8 @@ async function startServer() {
     "prev_renwood_count",
     "prev_new_shops",
     "curr_boh_data",
-    "prev_boh_data"
+    "prev_boh_data",
+    "dingtalk_qiyu_supplement"
   ] as const;
 
   const pickSharedMonthConfig = (source: any) => {
@@ -544,11 +548,167 @@ async function startServer() {
     return result;
   };
 
-  const APP_RELEASE = "1.5.1-month-owner-review";
+  const APP_RELEASE = "1.5.4-online-session-layout";
   const REPORT_LOGO_IDS = new Set(["jiumaojiu", "taier", "song", "group"]);
   const MAX_REPORT_LOGO_DATA_URL_LENGTH = 3_600_000;
 
   const cloneJson = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+
+  const QIYU_CATEGORY_KEYS = [
+    "菜品上下架调整",
+    "请求提供数据",
+    "电脑与软件问题",
+    "POS/KVS问题",
+    "打印机出单调整",
+    "优惠券及键位问题",
+    "网络问题"
+  ] as const;
+
+  const PAGE3_METRIC_KEYS = [
+    "online_sessions",
+    "data_maintenance",
+    "tickets",
+    "backup_4g",
+    "renovation"
+  ] as const;
+
+  const normalizePage3MetricOrder = (value: any) => {
+    const incoming = Array.isArray(value)
+      ? value.filter((item) => PAGE3_METRIC_KEYS.includes(item as any))
+      : [];
+    const unique = Array.from(new Set(incoming));
+    for (const key of PAGE3_METRIC_KEYS) {
+      if (!unique.includes(key)) unique.push(key);
+    }
+    return unique;
+  };
+
+  const emptyQiyuCategoryMap = () => Object.fromEntries(
+    QIYU_CATEGORY_KEYS.map((key) => [key, 0])
+  ) as Record<string, number>;
+
+  const normalizeDingtalkQiyuSupplement = (value: any, strict = false) => {
+    let source = value;
+    if (typeof value === "string") {
+      try {
+        source = value.trim() ? JSON.parse(value) : {};
+      } catch (e) {
+        if (strict) throw new Error("钉钉群会话补充数据格式非法");
+        source = {};
+      }
+    }
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      if (strict) throw new Error("钉钉群会话补充数据格式非法");
+      source = {};
+    }
+    const result = emptyQiyuCategoryMap();
+    for (const key of QIYU_CATEGORY_KEYS) {
+      const raw = source[key] ?? 0;
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+        if (strict) throw new Error(`${key} 的钉钉补充量必须是非负整数`);
+        result[key] = 0;
+      } else {
+        result[key] = parsed;
+      }
+    }
+    return result;
+  };
+
+  const addCategoryMaps = (base: Record<string, number> | null | undefined, supplement: Record<string, number> | null | undefined) => {
+    const result = emptyQiyuCategoryMap();
+    for (const key of QIYU_CATEGORY_KEYS) {
+      result[key] = Number(base?.[key] || 0) + Number(supplement?.[key] || 0);
+    }
+    return result;
+  };
+
+  const roundTo2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+
+  const buildServiceDeskVolumeMetrics = (qiyuRaw: any, dingtalkSessions: number) => {
+    const qiyuTotal = Number(qiyuRaw?.total || 0);
+    const dingtalkTotal = Math.max(0, Number(dingtalkSessions || 0));
+    const ratio = qiyuTotal > 0 ? roundTo2(dingtalkTotal / qiyuTotal) : 0;
+    const factor = roundTo2(1 + ratio);
+    return {
+      total: Math.round(qiyuTotal + dingtalkTotal),
+      valid: Math.round(Number(qiyuRaw?.valid || 0) * factor),
+      invalid: Math.round(Number(qiyuRaw?.invalid || 0) * factor),
+      unreplied: Math.round(Number(qiyuRaw?.unreplied || 0) * factor),
+      factor,
+      dingtalk_ratio: ratio,
+      qiyu_total: qiyuTotal,
+      dingtalk_total: dingtalkTotal
+    };
+  };
+
+  const subtractCategoryMaps = (combined: Record<string, number> | null | undefined, supplement: Record<string, number> | null | undefined) => {
+    const result = emptyQiyuCategoryMap();
+    for (const key of QIYU_CATEGORY_KEYS) {
+      result[key] = Math.max(0, Number(combined?.[key] || 0) - Number(supplement?.[key] || 0));
+    }
+    return result;
+  };
+
+  const mergeSharedComments = (...sources: any[]) => {
+    const merged: Record<string, any> = {};
+    for (const source of sources) {
+      if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+      for (const [key, value] of Object.entries(source)) {
+        if (value !== undefined) merged[key] = cloneJson(value);
+      }
+    }
+    return merged;
+  };
+
+  const getResolvedSharedComments = (config: any, metricsFallback?: any) => {
+    const history = Array.isArray(config?.generated_history) ? config.generated_history : [];
+    const historySources = history.flatMap((item: any) => [
+      item?.metrics?.custom_comments,
+      item?.comments
+    ]);
+    return mergeSharedComments(
+      metricsFallback?.custom_comments,
+      ...historySources,
+      config?.last_generated_snapshot?.metrics?.custom_comments,
+      config?.last_generated_snapshot?.comments,
+      config?.custom_comments
+    );
+  };
+
+  const getHistoricalQiyuBaseline = (config: any) => {
+    if (!config || typeof config !== "object") return null;
+    const snapshotMeta = getSnapshotMeta(config);
+    const candidates: any[] = [];
+    if (snapshotMeta.locked && config.final_snapshot?.metrics) {
+      candidates.push({ source: "final_snapshot", metrics: config.final_snapshot.metrics });
+    }
+    if (config.last_generated_snapshot?.metrics) {
+      candidates.push({ source: "working_snapshot", metrics: config.last_generated_snapshot.metrics });
+    }
+    const history = Array.isArray(config.generated_history) ? [...config.generated_history].reverse() : [];
+    for (const item of history) {
+      if (item?.metrics) candidates.push({ source: "generated_history", metrics: item.metrics });
+    }
+    for (const candidate of candidates) {
+      if (candidate.metrics?.current_qiyu_raw && candidate.metrics?.current_categories) {
+        const dingtalkSupplement = normalizeDingtalkQiyuSupplement(
+          candidate.metrics.current_dingtalk_qiyu_supplement || {}
+        );
+        const qiyuCategories = candidate.metrics.current_qiyu_categories
+          ? cloneJson(candidate.metrics.current_qiyu_categories)
+          : subtractCategoryMaps(candidate.metrics.current_categories, dingtalkSupplement);
+        return {
+          source: candidate.source,
+          raw: cloneJson(candidate.metrics.current_qiyu_raw),
+          qiyuCategories,
+          dingtalkSupplement,
+          combinedCategories: cloneJson(candidate.metrics.current_categories)
+        };
+      }
+    }
+    return null;
+  };
 
   const getSnapshotMeta = (config: any) => {
     const snapshot = config?.final_snapshot;
@@ -571,6 +731,33 @@ async function startServer() {
       workingStaleAt: config?._working_snapshot_stale_at || null,
       workingStaleReason: config?._working_snapshot_stale_reason || null
     };
+  };
+
+  const getHistoricalDingtalkTotal = (config: any): number | null => {
+    if (!config || typeof config !== "object") return null;
+    const snapshotMeta = getSnapshotMeta(config);
+    const candidates: any[] = [];
+    if (snapshotMeta.locked && config.final_snapshot?.metrics) {
+      candidates.push(config.final_snapshot.metrics);
+    }
+    if (config.last_generated_snapshot?.metrics) {
+      candidates.push(config.last_generated_snapshot.metrics);
+    }
+    const history = Array.isArray(config.generated_history) ? [...config.generated_history].reverse() : [];
+    for (const item of history) {
+      if (item?.metrics) candidates.push(item.metrics);
+    }
+    for (const metrics of candidates) {
+      if (metrics?.curr_dingtalk_sessions !== undefined && metrics?.curr_dingtalk_sessions !== null) {
+        const parsed = Number(metrics.curr_dingtalk_sessions);
+        if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+      }
+    }
+    if (config.curr_dingtalk_sessions !== undefined && config.curr_dingtalk_sessions !== null) {
+      const parsed = Number(config.curr_dingtalk_sessions);
+      if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    }
+    return null;
   };
 
   const markSnapshotStale = (config: any, reason: string, username?: string) => {
@@ -599,7 +786,7 @@ async function startServer() {
   const syncWorkingSnapshotContent = (config: any) => {
     const working = config?.last_generated_snapshot;
     if (!working?.metrics) return;
-    const comments = cloneJson(config.custom_comments || {});
+    const comments = getResolvedSharedComments(config, working.metrics);
     const reportLogos = cloneJson(config.report_logos || {});
     working.comments = comments;
     working.report_logos = reportLogos;
@@ -1006,6 +1193,38 @@ async function startServer() {
     }
   });
 
+  app.get("/api/report-settings/page3-metric-order", authenticateMiddleware, (req: any, res) => {
+    try {
+      const storage = loadStorage();
+      return res.json({
+        order: normalizePage3MetricOrder(storage.report_settings?.page3_metric_order)
+      });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message || "读取汇总页指标顺序失败" });
+    }
+  });
+
+  app.post("/api/report-settings/page3-metric-order", authenticateMiddleware, adminOnlyMiddleware, (req: any, res) => {
+    try {
+      const incoming = req.body?.order;
+      if (!Array.isArray(incoming)) {
+        return res.status(400).json({ error: "指标顺序格式非法" });
+      }
+      const order = normalizePage3MetricOrder(incoming);
+      const storage = loadStorage();
+      if (!storage.report_settings || typeof storage.report_settings !== "object") {
+        storage.report_settings = {};
+      }
+      storage.report_settings.page3_metric_order = order;
+      storage.report_settings.page3_metric_order_updated_at = new Date().toISOString();
+      storage.report_settings.page3_metric_order_updated_by = req.user?.username || "unknown";
+      saveStorage(storage);
+      return res.json({ success: true, order });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message || "保存汇总页指标顺序失败" });
+    }
+  });
+
   // 获取所有账号
   app.get("/api/users", authenticateMiddleware, adminOnlyMiddleware, async (req, res) => {
     try {
@@ -1161,6 +1380,16 @@ async function startServer() {
       for (const [key, value] of Object.entries(patch)) {
         if (allowedFields.has(key)) cleanPatch[key] = value;
       }
+      if (cleanPatch.dingtalk_qiyu_supplement !== undefined) {
+        try {
+          cleanPatch.dingtalk_qiyu_supplement = normalizeDingtalkQiyuSupplement(
+            cleanPatch.dingtalk_qiyu_supplement,
+            true
+          );
+        } catch (e: any) {
+          return res.status(400).json({ error: e.message || "钉钉群会话补充数据格式非法" });
+        }
+      }
       if (Object.keys(cleanPatch).length === 0) {
         return res.status(400).json({ error: "没有可保存的共享账期字段" });
       }
@@ -1255,10 +1484,10 @@ async function startServer() {
         : cloneJson(incomingMetrics.custom_comments || {});
       // 服务器协同数据为最终权威；客户端内容只补充服务器尚未出现的字段，
       // 避免某台较旧页面在锁定时把其他主管刚保存的批注/专项页覆盖掉。
-      const comments = {
-        ...fallbackComments,
-        ...cloneJson(config.custom_comments || {})
-      };
+      const comments = mergeSharedComments(
+        fallbackComments,
+        getResolvedSharedComments(config, incomingMetrics)
+      );
       const metrics = cloneJson(incomingMetrics);
       delete metrics.snapshot_meta;
       metrics.custom_comments = comments;
@@ -1752,7 +1981,7 @@ echo "=================================================="
   // 多端协同编辑实时监听与同步接口 (基于 Server DB & Memory)
   app.post("/api/collaboration/sync", authenticateMiddleware, (req: any, res) => {
     try {
-      const { month, editingField, clientComments, syncVersion } = req.body;
+      const { month, editingField, clientComments, syncVersion, migrationMode } = req.body;
       const username = req.user?.username || "unknown";
       if (!month || !username) {
         return res.status(400).json({ error: "Missing month or username" });
@@ -1761,6 +1990,7 @@ echo "=================================================="
       // [多端同步修复] v2 协议客户端（脏数据推送）：字段出现即代表用户主动修改，可直接信任；
       // 旧版客户端（无标识）会无差别全量上传字段，仅接受非空内容，防止新打开设备的空初始状态冲刷其他设备已保存的数据
       const isV2Client = syncVersion === 2;
+      const missingOnlyMigration = migrationMode === "missing-only";
       const hasVisibleText = (s: any) =>
         typeof s === "string" && s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, "").trim().length > 0;
 
@@ -1795,6 +2025,7 @@ echo "=================================================="
       }
 
       const hasClientCommentChanges = !!clientComments && typeof clientComments === "object" && Object.keys(clientComments).length > 0;
+      let migratedFields: string[] = [];
       if ((editingField || hasClientCommentChanges) && !requireReportEditAccess(req, res, month, storage)) {
         activeEditors.delete(sessionKey);
         return;
@@ -1810,24 +2041,48 @@ echo "=================================================="
           storage.month_configs[month].custom_comments = {};
         }
         const sComments = storage.month_configs[month].custom_comments;
+        const appliedFields: string[] = [];
+        const hasStoredValue = (key: string, value: any) => {
+          if (["slide4Comment", "slide5Comment", "slide6Comment", "slide7Comment", "slide8Comment"].includes(key)) {
+            return hasVisibleText(value);
+          }
+          if (["slide2Bullets", "customProjectSlides", "slideOrder"].includes(key)) {
+            return Array.isArray(value) && value.length > 0;
+          }
+          return value !== undefined && value !== null;
+        };
+        const applyField = (key: string, value: any, accepted: boolean) => {
+          if (!accepted) return;
+          if (missingOnlyMigration && hasStoredValue(key, sComments[key])) return;
+          sComments[key] = value;
+          appliedFields.push(key);
+        };
 
-        if (clientComments.slide2Bullets !== undefined && (isV2Client || (Array.isArray(clientComments.slide2Bullets) && clientComments.slide2Bullets.length > 0))) {
-          sComments.slide2Bullets = clientComments.slide2Bullets;
+        applyField("slide2Bullets", clientComments.slide2Bullets,
+          clientComments.slide2Bullets !== undefined && (isV2Client || (Array.isArray(clientComments.slide2Bullets) && clientComments.slide2Bullets.length > 0)));
+        applyField("slide4Comment", clientComments.slide4Comment,
+          clientComments.slide4Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide4Comment)));
+        applyField("slide5Comment", clientComments.slide5Comment,
+          clientComments.slide5Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide5Comment)));
+        applyField("slide6Comment", clientComments.slide6Comment,
+          clientComments.slide6Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide6Comment)));
+        applyField("slide7Comment", clientComments.slide7Comment,
+          clientComments.slide7Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide7Comment)));
+        applyField("slide8Comment", clientComments.slide8Comment,
+          clientComments.slide8Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide8Comment)));
+        applyField("customProjectSlides", clientComments.customProjectSlides,
+          clientComments.customProjectSlides !== undefined && (isV2Client || (Array.isArray(clientComments.customProjectSlides) && clientComments.customProjectSlides.length > 0)));
+        // 旧客户端仅在服务端尚无排序时允许初始化；迁移模式同样只补服务器缺失字段。
+        applyField("slideOrder", clientComments.slideOrder,
+          clientComments.slideOrder !== undefined && (isV2Client || !sComments.slideOrder));
+        if (appliedFields.length > 0) {
+          if (missingOnlyMigration) migratedFields = [...appliedFields];
+          storage.month_configs[month].custom_comments = sComments;
+          markSnapshotStale(storage.month_configs[month], missingOnlyMigration ? "已恢复本机历史月报文案" : "月报文字、专项页或页面布局已发生修改", username);
+          // 文本/专项页不改变统计指标，可直接同步进共享工作版，避免另一台电脑仍看到旧文字。
+          syncWorkingSnapshotContent(storage.month_configs[month]);
+          saveStorage(storage);
         }
-        if (clientComments.slide4Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide4Comment))) sComments.slide4Comment = clientComments.slide4Comment;
-        if (clientComments.slide5Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide5Comment))) sComments.slide5Comment = clientComments.slide5Comment;
-        if (clientComments.slide6Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide6Comment))) sComments.slide6Comment = clientComments.slide6Comment;
-        if (clientComments.slide7Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide7Comment))) sComments.slide7Comment = clientComments.slide7Comment;
-        if (clientComments.slide8Comment !== undefined && (isV2Client || hasVisibleText(clientComments.slide8Comment))) sComments.slide8Comment = clientComments.slide8Comment;
-        if (clientComments.customProjectSlides !== undefined && (isV2Client || (Array.isArray(clientComments.customProjectSlides) && clientComments.customProjectSlides.length > 0))) sComments.customProjectSlides = clientComments.customProjectSlides;
-        // [多端同步修复] 旧客户端仅在服务端尚无排序时允许初始化，之后仅 v2 客户端可变更，防止默认排序冲刷自定义排序
-        if (clientComments.slideOrder !== undefined && (isV2Client || !sComments.slideOrder)) sComments.slideOrder = clientComments.slideOrder;
-
-        storage.month_configs[month].custom_comments = sComments;
-        markSnapshotStale(storage.month_configs[month], "月报文字、专项页或页面顺序已发生修改", username);
-        // 文本/专项页不改变统计指标，可直接同步进共享工作版，避免另一台电脑仍看到旧文字。
-        syncWorkingSnapshotContent(storage.month_configs[month]);
-        saveStorage(storage);
       }
 
       // 4) 过滤出除本人外，该月份当前活跃的在线协同人员定位
@@ -1843,7 +2098,8 @@ echo "=================================================="
 
       return res.json({
         activeEditors: othersEditing,
-        serverComments: storage.month_configs[month]?.custom_comments || null
+        serverComments: storage.month_configs[month]?.custom_comments || null,
+        migratedFields
       });
     } catch (e: any) {
       console.error("协同同步失败:", e);
@@ -2227,7 +2483,8 @@ echo "=================================================="
         prev_renwood_count,
         prev_new_shops,
         curr_boh_json,
-        prev_boh_json
+        prev_boh_json,
+        dingtalk_qiyu_supplement_json
       } = req.body;
 
       if (!month || !/^\d{4}-\d{2}$/.test(month)) {
@@ -2240,7 +2497,13 @@ echo "=================================================="
       }
       const isSubmit = req.body.is_submit === "true";
       const qiyuFiles = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
-      const hasQiyuUpload = !!(qiyuFiles?.["prev_qiyu_file"]?.[0] || qiyuFiles?.["curr_qiyu_file"]?.[0]);
+      const legacyPrevQiyuFile = qiyuFiles?.["prev_qiyu_file"]?.[0];
+      if (legacyPrevQiyuFile) {
+        return res.status(409).json({
+          detail: "上月七鱼数据已改为从服务器历史版本自动继承，请刷新页面后只上传当前账期七鱼文件。"
+        });
+      }
+      const hasQiyuUpload = !!qiyuFiles?.["curr_qiyu_file"]?.[0];
       if (isSubmit || hasQiyuUpload) {
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -2257,6 +2520,14 @@ echo "=================================================="
       const cachedConfig = hasCached ? storage.month_configs[month] : {};
       const cachedSnapshotMeta = getSnapshotMeta(cachedConfig);
       const submittedBaseRevision = isSubmit ? Number(req.body.base_revision) : null;
+      let currentDingtalkQiyuSupplement: Record<string, number>;
+      try {
+        currentDingtalkQiyuSupplement = dingtalk_qiyu_supplement_json !== undefined
+          ? normalizeDingtalkQiyuSupplement(dingtalk_qiyu_supplement_json, true)
+          : normalizeDingtalkQiyuSupplement(cachedConfig.dingtalk_qiyu_supplement || {});
+      } catch (e: any) {
+        return res.status(400).json({ detail: e.message || "钉钉群会话补充数据格式非法" });
+      }
 
       if (isSubmit) {
         const currentRevision = Number(cachedConfig._revision || 0);
@@ -2297,9 +2568,7 @@ echo "=================================================="
       // 避免不同电脑在不同时间重新查询历史 RDS/钉钉后拼出不同的月报预览。
       if (!isSubmit && cachedConfig.last_generated_snapshot?.metrics) {
         const workingMetrics = cloneJson(cachedConfig.last_generated_snapshot.metrics);
-        workingMetrics.custom_comments = cloneJson(
-          cachedConfig.last_generated_snapshot.comments || cachedConfig.custom_comments || workingMetrics.custom_comments || {}
-        );
+        workingMetrics.custom_comments = getResolvedSharedComments(cachedConfig, workingMetrics);
         workingMetrics.snapshot_meta = {
           ...cachedSnapshotMeta,
           source: "working_snapshot",
@@ -2381,12 +2650,13 @@ echo "=================================================="
         }
       }
 
-      if (prev_dingtalk_sessions !== undefined && prev_dingtalk_sessions !== null && prev_dingtalk_sessions !== "") {
+      const inheritedPrevDingtalkSessions = getHistoricalDingtalkTotal(prevConfig);
+      if (inheritedPrevDingtalkSessions !== null) {
+        final_prev_dingtalk_sessions = inheritedPrevDingtalkSessions;
+      } else if (prev_dingtalk_sessions !== undefined && prev_dingtalk_sessions !== null && prev_dingtalk_sessions !== "") {
         final_prev_dingtalk_sessions = Number(prev_dingtalk_sessions);
       } else if (cachedConfig.prev_dingtalk_sessions !== undefined) {
         final_prev_dingtalk_sessions = cachedConfig.prev_dingtalk_sessions;
-      } else if (prevConfig && prevConfig.curr_dingtalk_sessions !== undefined) {
-        final_prev_dingtalk_sessions = prevConfig.curr_dingtalk_sessions;
       } else {
         if (prevMonthStr === "2026-06") {
           final_prev_dingtalk_sessions = 992;
@@ -2432,6 +2702,8 @@ echo "=================================================="
         "优惠券及键位问题": prevMonthStr === "2026-06" ? 120 : 0,
         "网络问题": prevMonthStr === "2026-06" ? 50 : 0
       };
+      let compareDingtalkQiyuSupplement = emptyQiyuCategoryMap();
+      let inheritedCombinedCategories: Record<string, number> | null = null;
 
       let current_qiyu_raw: any = {
         total: isJune ? 2006 : 0,
@@ -2491,33 +2763,39 @@ echo "=================================================="
         }
       }
 
-      // 解析上传的上月会话表格或使用本地文件缓存
-      const prevFileObj = files?.["prev_qiyu_file"]?.[0];
-      if (prevFileObj) {
-        // 如果有上传文件，先重置为0，再由解析函数累加填充
-        for (const k of Object.keys(qiyu_categories_compare)) {
-          qiyu_categories_compare[k] = 0;
-        }
-        const parsed = parseQiyuFile(prevFileObj.buffer, qiyu_categories_compare);
-        if (parsed) {
-          compare_qiyu_raw = parsed;
-          storage.qiyu_cache[compare_month] = {
-            raw_metrics_json: JSON.stringify(compare_qiyu_raw),
-            categories_json: JSON.stringify(qiyu_categories_compare)
-          };
-          saveStorage(storage);
-        }
+      // 上月七鱼数据只从服务器历史版本继承，当前账期不再允许重新上传并覆盖历史月份。
+      const previousMonthConfig = storage.month_configs?.[compare_month] || null;
+      const inheritedQiyu = getHistoricalQiyuBaseline(previousMonthConfig);
+      if (inheritedQiyu) {
+        compare_qiyu_raw = inheritedQiyu.raw;
+        for (const k of Object.keys(qiyu_categories_compare)) qiyu_categories_compare[k] = 0;
+        Object.assign(qiyu_categories_compare, inheritedQiyu.qiyuCategories);
+        compareDingtalkQiyuSupplement = inheritedQiyu.dingtalkSupplement;
+        inheritedCombinedCategories = inheritedQiyu.combinedCategories;
+        console.log(`[Qiyu] ${month} 上月基准 ${compare_month} 来源: ${inheritedQiyu.source}`);
       } else {
+        compareDingtalkQiyuSupplement = normalizeDingtalkQiyuSupplement(
+          previousMonthConfig?.dingtalk_qiyu_supplement || {}
+        );
         const cached = storage.qiyu_cache[compare_month];
         if (cached) {
           try {
             compare_qiyu_raw = JSON.parse(cached.raw_metrics_json);
+            for (const k of Object.keys(qiyu_categories_compare)) qiyu_categories_compare[k] = 0;
             Object.assign(qiyu_categories_compare, JSON.parse(cached.categories_json));
+            console.log(`[Qiyu] ${month} 上月基准 ${compare_month} 来源: qiyu_cache`);
           } catch (e) {
             console.error("解析上月缓存失败:", e);
           }
         }
       }
+
+      // “线上咨询问题分析”统一使用：七鱼原始分类 + 钉钉群人工补充。
+      // 原始七鱼、人工补充、最终合计分别保留，便于后续审计和问题追溯。
+      const currentCombinedCategories = addCategoryMaps(qiyu_categories_current, currentDingtalkQiyuSupplement);
+      const compareCombinedCategories = inheritedCombinedCategories
+        ? cloneJson(inheritedCombinedCategories)
+        : addCategoryMaps(qiyu_categories_compare, compareDingtalkQiyuSupplement);
 
       // 强力属性防御机制，物理熔断 undefined 报错
       if (current_qiyu_raw.avg_first_reply === undefined) current_qiyu_raw.avg_first_reply = 75.73;
@@ -2534,6 +2812,17 @@ echo "=================================================="
       if (compare_qiyu_raw.reply_30s_pct === undefined) compare_qiyu_raw.reply_30s_pct = 0.3310;
       if (compare_qiyu_raw.answer_to_question_ratio === undefined) compare_qiyu_raw.answer_to_question_ratio = 0.5948;
       if (compare_qiyu_raw.relative_satisfaction === undefined) compare_qiyu_raw.relative_satisfaction = 0.7500;
+
+      // 门店服务台左侧统一使用线上会话口径：七鱼 + 钉钉。
+      // 有效/无效/未回复按用户确认的独立系数公式放大，不强制三项之和等于线上会话总量。
+      const currentServiceDeskVolume = buildServiceDeskVolumeMetrics(
+        current_qiyu_raw,
+        Number(final_curr_dingtalk_sessions || 0)
+      );
+      const compareServiceDeskVolume = buildServiceDeskVolumeMetrics(
+        compare_qiyu_raw,
+        Number(final_prev_dingtalk_sessions || 0)
+      );
 
       // 5. 阿里云物理网关数据抓取与柔性降级基本盘
       const DB_CONFIG = {
@@ -2978,6 +3267,7 @@ echo "=================================================="
           prev_new_shops: final_prev_new_shops,
           curr_boh_data,
           prev_boh_data,
+          dingtalk_qiyu_supplement: currentDingtalkQiyuSupplement,
           _revision: Number(existingMonthConfig._revision || 0) + 1,
           _updated_at: new Date().toISOString(),
           _updated_by: req.user?.username || existingMonthConfig._updated_by || "unknown"
@@ -3006,8 +3296,16 @@ echo "=================================================="
         compare_month_qiyu_valid: compare_qiyu_raw.valid,
         current_qiyu_raw,
         compare_qiyu_raw,
-        current_categories: qiyu_categories_current,
-        compare_categories: qiyu_categories_compare,
+        current_qiyu_categories: cloneJson(qiyu_categories_current),
+        compare_qiyu_categories: cloneJson(qiyu_categories_compare),
+        current_dingtalk_qiyu_supplement: cloneJson(currentDingtalkQiyuSupplement),
+        compare_dingtalk_qiyu_supplement: cloneJson(compareDingtalkQiyuSupplement),
+        current_categories: currentCombinedCategories,
+        compare_categories: compareCombinedCategories,
+        current_online_sessions: currentServiceDeskVolume.total,
+        compare_online_sessions: compareServiceDeskVolume.total,
+        current_service_desk_volume: currentServiceDeskVolume,
+        compare_service_desk_volume: compareServiceDeskVolume,
         curr_boh_data,
         prev_boh_data,
         ticket_brand_distribution,
@@ -3045,7 +3343,7 @@ echo "=================================================="
           generated_by: req.user?.username || "unknown",
           release: APP_RELEASE,
           metrics: generatedMetrics,
-          comments: cloneJson(config.custom_comments || generatedMetrics.custom_comments || {}),
+          comments: getResolvedSharedComments(config, generatedMetrics),
           report_logos: cloneJson(config.report_logos || {})
         };
         config.last_generated_snapshot = generatedRecord;

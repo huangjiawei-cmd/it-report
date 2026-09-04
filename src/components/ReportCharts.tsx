@@ -7,6 +7,7 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
+  LabelList,
   ResponsiveContainer as RechartsResponsiveContainer,
 } from "recharts";
 import { QiyuRaw, BohBrandDetails, SupplierSplits } from "../types";
@@ -121,25 +122,39 @@ const renderExactRightLabel = (props: any) => {
 
 // 1. Slide 4: 线上咨询问题分析 - Vertical Grouped Bar Chart with top labels
 interface QiyuCategoriesProps {
-  current: Record<string, number>;
-  compare: Record<string, number>;
+  currentQiyu: Record<string, number>;
+  currentDingtalk: Record<string, number>;
+  compareQiyu: Record<string, number>;
+  compareDingtalk: Record<string, number>;
   prevLabel: string;
   currLabel: string;
 }
 export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
-  current,
-  compare,
+  currentQiyu,
+  currentDingtalk,
+  compareQiyu,
+  compareDingtalk,
   prevLabel,
   currLabel
 }) => {
-  const data = Object.keys(current).map(key => ({
+  const keys = Array.from(new Set([
+    ...Object.keys(currentQiyu || {}),
+    ...Object.keys(currentDingtalk || {}),
+    ...Object.keys(compareQiyu || {}),
+    ...Object.keys(compareDingtalk || {})
+  ]));
+  const data = keys.map(key => ({
     name: key,
-    [prevLabel]: compare[key] || 0,
-    [currLabel]: current[key] || 0
+    prevQiyu: compareQiyu?.[key] || 0,
+    prevDingtalk: compareDingtalk?.[key] || 0,
+    currQiyu: currentQiyu?.[key] || 0,
+    currDingtalk: currentDingtalk?.[key] || 0,
+    prevTotal: (compareQiyu?.[key] || 0) + (compareDingtalk?.[key] || 0),
+    currTotal: (currentQiyu?.[key] || 0) + (currentDingtalk?.[key] || 0)
   }));
 
   // Sort descending by current month values
-  data.sort((a, b) => b[currLabel] - a[currLabel]);
+  data.sort((a, b) => b.currTotal - a.currTotal);
 
   return (
     <ResponsiveContainer width="100%" height="100%" pdfWidth={1024} pdfHeight={310}>
@@ -153,23 +168,44 @@ export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
         <XAxis dataKey="name" stroke="#4b5563" fontSize={10.5} tickLine={false} />
         <YAxis stroke="#4b5563" fontSize={11} tickLine={false} axisLine={false} />
         <Tooltip content={<CustomTooltip />} />
-        <Legend verticalAlign="bottom" height={36} iconSize={12} iconType="rect" />
         <Bar
-          dataKey={prevLabel}
+          dataKey="prevQiyu"
+          name={`${prevLabel} · 七鱼`}
+          stackId="prev"
           fill={COLOR_COMP_BLUE}
-          radius={[1, 1, 0, 0]}
-          barSize={14}
-          label={renderCustomBarLabel}
+          barSize={18}
           isAnimationActive={false}
         />
         <Bar
-          dataKey={currLabel}
+          dataKey="prevDingtalk"
+          name={`${prevLabel} · 钉钉`}
+          stackId="prev"
           fill={COLOR_CURR_RED}
           radius={[1, 1, 0, 0]}
-          barSize={14}
-          label={renderCustomBarLabel}
+          barSize={18}
+          isAnimationActive={false}
+        >
+          <LabelList dataKey="prevTotal" position="top" content={renderCustomBarLabel as any} />
+        </Bar>
+        <Bar
+          dataKey="currQiyu"
+          name={`${currLabel} · 七鱼`}
+          stackId="curr"
+          fill={COLOR_COMP_BLUE}
+          barSize={18}
           isAnimationActive={false}
         />
+        <Bar
+          dataKey="currDingtalk"
+          name={`${currLabel} · 钉钉`}
+          stackId="curr"
+          fill={COLOR_CURR_RED}
+          radius={[1, 1, 0, 0]}
+          barSize={18}
+          isAnimationActive={false}
+        >
+          <LabelList dataKey="currTotal" position="top" content={renderCustomBarLabel as any} />
+        </Bar>
       </BarChart>
     </ResponsiveContainer>
   );
@@ -177,8 +213,8 @@ export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
 
 // 2. Slide 5: 4月、5月会话对比 - Horizontal Grouped Bar Chart
 interface QiyuCompareProps {
-  current: QiyuRaw;
-  compare: QiyuRaw;
+  current: Pick<QiyuRaw, "total" | "valid" | "invalid" | "unreplied">;
+  compare: Pick<QiyuRaw, "total" | "valid" | "invalid" | "unreplied">;
   prevLabel: string;
   currLabel: string;
 }

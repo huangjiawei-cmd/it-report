@@ -128,6 +128,34 @@ const REPORT_LOGO_META: Array<{
   { id: "group", name: "九毛九集团总部", emoji: "💻", fallbackClass: "bg-amber-400 text-slate-900 border-2 border-rose-500" }
 ];
 
+const PAGE3_METRIC_KEYS = [
+  "online_sessions",
+  "data_maintenance",
+  "tickets",
+  "backup_4g",
+  "renovation"
+] as const;
+type Page3MetricKey = typeof PAGE3_METRIC_KEYS[number];
+const DEFAULT_PAGE3_METRIC_ORDER: Page3MetricKey[] = [...PAGE3_METRIC_KEYS];
+const PAGE3_METRIC_LABELS: Record<Page3MetricKey, string> = {
+  online_sessions: "线上会话",
+  data_maintenance: "数据维护",
+  tickets: "叫修工单",
+  backup_4g: "4G备线接管宽带",
+  renovation: "门店装修"
+};
+
+const normalizePage3MetricOrder = (value: any): Page3MetricKey[] => {
+  const incoming = Array.isArray(value)
+    ? value.filter((item): item is Page3MetricKey => PAGE3_METRIC_KEYS.includes(item as Page3MetricKey))
+    : [];
+  const unique = Array.from(new Set(incoming));
+  for (const key of PAGE3_METRIC_KEYS) {
+    if (!unique.includes(key)) unique.push(key);
+  }
+  return unique;
+};
+
 const createDefaultProjectSlide = (monthLabel: string, index: number): ProjectSlide => {
   const monthClean = monthLabel.replace("2026-", "");
   return {
@@ -196,6 +224,37 @@ const cleanHtml = (html: string): string => {
     return doc.body.innerHTML;
   } catch (e) {
     return html;
+  }
+};
+
+// 将分析框内容统一为“纯正文格式”：保留段落、列表与换行结构，
+// 清除粗体/斜体/下划线/字体/字号/颜色等富文本标记。
+const normalizeCommentaryFormat = (html: string): string => {
+  if (!html) return "";
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const keepTags = new Set(["BR", "P", "DIV", "OL", "UL", "LI"]);
+    const elements = Array.from(doc.body.querySelectorAll("*"));
+
+    for (const el of elements) {
+      el.removeAttribute("style");
+      el.removeAttribute("class");
+      el.removeAttribute("face");
+      el.removeAttribute("size");
+      el.removeAttribute("color");
+      el.removeAttribute("id");
+
+      if (!keepTags.has(el.tagName)) {
+        const parent = el.parentNode;
+        if (!parent) continue;
+        while (el.firstChild) parent.insertBefore(el.firstChild, el);
+        parent.removeChild(el);
+      }
+    }
+
+    return doc.body.innerHTML;
+  } catch (e) {
+    return cleanHtml(html);
   }
 };
 
@@ -286,6 +345,17 @@ const CollaborativeInput: React.FC<CollaborativeInputProps> = ({
   );
 };
 
+const NormalizeFormatButton: React.FC<{ onClick: () => void }> = ({ onClick }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className="no-print px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[10px] font-semibold text-slate-500 hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-50/40 transition-colors shadow-3xs"
+    title="清除粗体、斜体、字号、颜色等格式，只保留文字、编号和换行"
+  >
+    Aa 统一格式
+  </button>
+);
+
 export const ReportPage: React.FC<ReportPageProps> = ({
   metrics,
   month,
@@ -300,6 +370,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   const reportReadOnly = snapshotLocked || !canEdit;
   const [snapshotActionBusy, setSnapshotActionBusy] = useState(false);
   const [snapshotActionError, setSnapshotActionError] = useState<string | null>(null);
+  const [legacyRestoreNotice, setLegacyRestoreNotice] = useState<string | null>(null);
+  const legacyMigrationAttemptRef = useRef<Set<string>>(new Set());
   const [reportLogos, setReportLogos] = useState<Partial<Record<ReportLogoId, string>>>({});
   const [reportLogoBusy, setReportLogoBusy] = useState<ReportLogoId | null>(null);
   const [reportLogoError, setReportLogoError] = useState<string | null>(null);
@@ -311,6 +383,32 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     if (token) headers.set("Authorization", `Bearer ${token}`);
     return fetch(url, { ...options, headers });
   };
+
+  // PAGE03 指标顺序：编辑中的月报统一读取管理员维护的全局顺序；
+  // 已归档月报读取快照中冻结的当时顺序，避免未来全局调整改变历史 PDF。
+  useEffect(() => {
+    if (snapshotLocked) {
+      setPage3MetricOrder(normalizePage3MetricOrder((metrics as any).custom_comments?.page3MetricOrder));
+      return;
+    }
+    if (!currentUser) return;
+    let cancelled = false;
+    authenticatedJsonFetch("/api/report-settings/page3-metric-order")
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "指标顺序加载失败");
+        if (!cancelled) setPage3MetricOrder(normalizePage3MetricOrder(data.order));
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          console.warn("[PAGE03] 全局指标顺序加载失败，使用默认顺序:", e);
+          setPage3MetricOrder(DEFAULT_PAGE3_METRIC_ORDER);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [month, snapshotLocked, currentUser?.username]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -403,6 +501,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   // 专项页与页序以服务器 custom_comments 为权威源；localStorage 仅保留写入备份，不再参与首次展示。
   const [customProjectSlides, setCustomProjectSlides] = useState<ProjectSlide[]>([]);
   const [slideOrder, setSlideOrder] = useState<SlideOrderConfig[]>(() => getDefaultSlideOrder([]));
+  const [page3MetricOrder, setPage3MetricOrder] = useState<Page3MetricKey[]>(DEFAULT_PAGE3_METRIC_ORDER);
+  const [page3OrderBusy, setPage3OrderBusy] = useState(false);
 
   // 动态计算总页数（直接跟随 slideOrder 的元素数量）
   const totalSlides = slideOrder.length;
@@ -419,6 +519,34 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     } catch (e) {}
     localEditsRef.current.slideOrder = nextOrder;
     markDirty("slideOrder");
+  };
+
+  const savePage3MetricOrder = async (nextOrder: Page3MetricKey[]) => {
+    if (page3OrderBusy || snapshotLocked || currentUser?.role !== "管理员") return;
+    const normalized = normalizePage3MetricOrder(nextOrder);
+    setPage3OrderBusy(true);
+    try {
+      const res = await authenticatedJsonFetch("/api/report-settings/page3-metric-order", {
+        method: "POST",
+        body: JSON.stringify({ order: normalized })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "指标顺序保存失败");
+      setPage3MetricOrder(normalizePage3MetricOrder(data.order));
+    } catch (e: any) {
+      window.alert(e.message || "指标顺序保存失败");
+    } finally {
+      setPage3OrderBusy(false);
+    }
+  };
+
+  const handleMovePage3Metric = (key: Page3MetricKey, direction: -1 | 1) => {
+    const index = page3MetricOrder.indexOf(key);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= page3MetricOrder.length) return;
+    const next = [...page3MetricOrder];
+    [next[index], next[target]] = [next[target], next[index]];
+    void savePage3MetricOrder(next);
   };
 
   // 拖拽排序状态与 Handler 引擎
@@ -787,7 +915,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         slide7Comment: localEditsRef.current.slide7Comment,
         slide8Comment: localEditsRef.current.slide8Comment,
         customProjectSlides: localEditsRef.current.customProjectSlides,
-        slideOrder: localEditsRef.current.slideOrder
+        slideOrder: localEditsRef.current.slideOrder,
+        page3MetricOrder: [...page3MetricOrder]
       };
       const metricsForSnapshot: any = {
         ...metrics,
@@ -917,6 +1046,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     const newShopsCount = m.current_new_shops ?? 0;
 
     const qiyuTotal = m.current_qiyu_raw?.total ?? 0;
+    const dingtalkTotal = m.curr_dingtalk_sessions ?? 0;
+    const onlineTotal = m.current_online_sessions ?? (qiyuTotal + dingtalkTotal);
     const qiyuValid = m.current_qiyu_raw?.valid ?? 0;
     const qiyuInvalid = m.current_qiyu_raw?.invalid ?? 0;
     const qiyuUnreplied = m.current_qiyu_raw?.unreplied ?? 0;
@@ -936,7 +1067,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
 
     const defaultBullets = [
       `${monthClean}太二完成 ${renovationCount} 家 5.0 版本旧改门店装修；截至当月底，累计开业改造门店多端对齐。`,
-      `${monthClean}门店服务台累计受理会话 ${qiyuTotal} 条，其中有效留言 ${qiyuValid} 条、访客工单为 ${qiyuInvalid} 条。`,
+      `${monthClean}线上咨询累计 ${onlineTotal} 条，其中七鱼会话 ${qiyuTotal} 条、钉钉会话 ${dingtalkTotal} 条。`,
       `本月新增九毛九/太二门店 POS 最小化可用，配合运维组持续进行稳定性维护，逐步分批次上线。`,
       `${monthClean}三品牌基础数据维护工作稳步推进，运维团队全力保障节假日促销期各大核心品牌系统的低变动高可用运行。`,
       `叫修工单共计 ${ticketsTotal} 单，平均完结时长 ${ticketsAvgDays} 天，较上月 ${ticketsCompAvgDays} 天整体平稳可控。`
@@ -1060,6 +1191,100 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     metrics.custom_comments
   ]);
 
+  // 旧版曾把部分已完成文案只留在浏览器 localStorage。新版服务器字段缺失时，
+  // 仅允许本月负责人/管理员把本机历史内容“补缺”到服务器，绝不覆盖服务器已有字段。
+  useEffect(() => {
+    if (!currentUser || !canEdit || snapshotLocked) return;
+    const migrationKey = `${month}:${metrics.curr_month_label}`;
+    if (legacyMigrationAttemptRef.current.has(migrationKey)) return;
+
+    const serverComments: any = (metrics as any).custom_comments || {};
+    const candidates: Record<string, any> = {};
+    const hasServerArray = (key: string) => Array.isArray(serverComments[key]) && serverComments[key].length > 0;
+
+    try {
+      if (!hasServerArray("slide2Bullets")) {
+        const raw = localStorage.getItem(`${metrics.curr_month_label}_slide2Bullets`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.some((item) => isNonEmptyText(item))) {
+            candidates.slide2Bullets = parsed.filter((item) => isNonEmptyText(item));
+          }
+        }
+      }
+
+      for (const key of ["slide4Comment", "slide5Comment", "slide6Comment", "slide7Comment", "slide8Comment"] as const) {
+        if (!isNonEmptyText(serverComments[key])) {
+          const legacy = localStorage.getItem(`${metrics.curr_month_label}_${key}`);
+          if (isNonEmptyText(legacy)) candidates[key] = cleanHtml(legacy!);
+        }
+      }
+
+      if (!hasServerArray("customProjectSlides")) {
+        const raw = localStorage.getItem(`${metrics.curr_month_label}_customProjectSlides`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) candidates.customProjectSlides = parsed;
+        }
+      }
+      if (!hasServerArray("slideOrder")) {
+        const raw = localStorage.getItem(`${metrics.curr_month_label}_slideOrder`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) candidates.slideOrder = parsed;
+        }
+      }
+    } catch (e) {
+      console.warn("[Legacy Comment Migration] 本机历史内容解析失败:", e);
+    }
+
+    if (Object.keys(candidates).length === 0) {
+      legacyMigrationAttemptRef.current.add(migrationKey);
+      return;
+    }
+
+    legacyMigrationAttemptRef.current.add(migrationKey);
+    authenticatedJsonFetch("/api/collaboration/sync", {
+      method: "POST",
+      body: JSON.stringify({
+        month,
+        editingField: null,
+        syncVersion: 2,
+        migrationMode: "missing-only",
+        clientComments: candidates
+      })
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "历史文案恢复失败");
+        const sc = data.serverComments || {};
+        if (Array.isArray(sc.slide2Bullets) && sc.slide2Bullets.some((item: string) => isNonEmptyText(item))) {
+          setSlide2Bullets(sc.slide2Bullets.filter((item: string) => isNonEmptyText(item)));
+        }
+        if (isNonEmptyText(sc.slide4Comment)) setSlide4Comment(cleanHtml(sc.slide4Comment));
+        if (isNonEmptyText(sc.slide5Comment)) setSlide5Comment(cleanHtml(sc.slide5Comment));
+        if (isNonEmptyText(sc.slide6Comment)) setSlide6Comment(cleanHtml(sc.slide6Comment));
+        if (isNonEmptyText(sc.slide7Comment)) setSlide7Comment(cleanHtml(sc.slide7Comment));
+        if (isNonEmptyText(sc.slide8Comment)) setSlide8Comment(cleanHtml(sc.slide8Comment));
+        if (Array.isArray(sc.customProjectSlides)) {
+          setCustomProjectSlides(sc.customProjectSlides);
+          if (Array.isArray(sc.slideOrder)) {
+            setSlideOrder(reconcileSlideOrder(sc.slideOrder, sc.customProjectSlides));
+          }
+        } else if (Array.isArray(sc.slideOrder)) {
+          setSlideOrder(reconcileSlideOrder(sc.slideOrder, []));
+        }
+        const migratedCount = Array.isArray(data.migratedFields) ? data.migratedFields.length : 0;
+        if (migratedCount > 0) {
+          setLegacyRestoreNotice(`已从本机历史缓存恢复 ${migratedCount} 项月报内容到服务器，其他电脑刷新后会读取同一版本。`);
+        }
+      })
+      .catch((e) => {
+        legacyMigrationAttemptRef.current.delete(migrationKey);
+        console.warn("[Legacy Comment Migration] 恢复失败:", e);
+      });
+  }, [month, metrics.curr_month_label, metrics.custom_comments, currentUser?.username, canEdit, snapshotLocked]);
+
   // Persisting state setter helpers
   const saveBullets = (next: string[]) => {
     setSlide2Bullets(next);
@@ -1134,6 +1359,17 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     markDirty("slide8Comment");
   };
 
+  const applyUnifiedCommentaryFormat = (
+    key: "slide4Comment" | "slide5Comment" | "slide6Comment" | "slide7Comment" | "slide8Comment",
+    fallback: string,
+    save: (text: string) => void
+  ) => {
+    const latest = (localEditsRef.current as any)[key] || fallback;
+    const normalized = normalizeCommentaryFormat(latest);
+    (localEditsRef.current as any)[key] = normalized;
+    save(normalized);
+  };
+
   // 单个分析框：手动载入上月文本
   const handleLoadPrevComment = (
     key: "slide4Comment" | "slide5Comment" | "slide6Comment" | "slide7Comment" | "slide8Comment",
@@ -1183,8 +1419,53 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     return `${pct}%`;
   };
 
+  const buildClientServiceDeskVolume = (raw: any, dingtalkSessions: number) => {
+    const qiyuTotal = Number(raw?.total || 0);
+    const dingtalkTotal = Math.max(0, Number(dingtalkSessions || 0));
+    const ratio = qiyuTotal > 0
+      ? Math.round(((dingtalkTotal / qiyuTotal) + Number.EPSILON) * 100) / 100
+      : 0;
+    const factor = Math.round(((1 + ratio) + Number.EPSILON) * 100) / 100;
+    return {
+      total: Math.round(qiyuTotal + dingtalkTotal),
+      valid: Math.round(Number(raw?.valid || 0) * factor),
+      invalid: Math.round(Number(raw?.invalid || 0) * factor),
+      unreplied: Math.round(Number(raw?.unreplied || 0) * factor),
+      factor,
+      dingtalk_ratio: ratio,
+      qiyu_total: qiyuTotal,
+      dingtalk_total: dingtalkTotal
+    };
+  };
+
+  const currentServiceDeskVolume = metrics.current_service_desk_volume || buildClientServiceDeskVolume(
+    metrics.current_qiyu_raw,
+    metrics.curr_dingtalk_sessions || 0
+  );
+  const compareServiceDeskVolume = metrics.compare_service_desk_volume || buildClientServiceDeskVolume(
+    metrics.compare_qiyu_raw,
+    metrics.prev_dingtalk_sessions || 0
+  );
+  const currentOnlineSessions = metrics.current_online_sessions ?? currentServiceDeskVolume.total;
+  const compareOnlineSessions = metrics.compare_online_sessions ?? compareServiceDeskVolume.total;
+  const currentDingtalkCategorySupplement = metrics.current_dingtalk_qiyu_supplement || {};
+  const compareDingtalkCategorySupplement = metrics.compare_dingtalk_qiyu_supplement || {};
+  const currentQiyuCategories = metrics.current_qiyu_categories || Object.fromEntries(
+    Object.keys(metrics.current_categories || {}).map((key) => [
+      key,
+      Math.max(0, Number(metrics.current_categories?.[key] || 0) - Number(currentDingtalkCategorySupplement[key] || 0))
+    ])
+  );
+  const compareQiyuCategories = metrics.compare_qiyu_categories || Object.fromEntries(
+    Object.keys(metrics.compare_categories || {}).map((key) => [
+      key,
+      Math.max(0, Number(metrics.compare_categories?.[key] || 0) - Number(compareDingtalkCategorySupplement[key] || 0))
+    ])
+  );
+
   // Helper render for individual slides based on dynamic slideOrder
-  const renderSlide = (slidePosIndex: number) => {
+  const renderSlide = (slidePosIndex: number, forcePdfMode = false) => {
+    const renderPdfMode = isPdf || forcePdfMode;
     const slideConfig = slideOrder[slidePosIndex];
     if (!slideConfig) return null;
 
@@ -1269,9 +1550,9 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                       <label
                         key={brand.id}
                         className={`group relative border border-slate-150 rounded-2xl p-3 h-[145px] flex items-center justify-center bg-slate-50/50 transition-all shadow-xs overflow-hidden ${
-                          !isPdf && !reportReadOnly ? "hover:bg-slate-50 hover:border-indigo-300 cursor-pointer" : ""
+                          !renderPdfMode && !reportReadOnly ? "hover:bg-slate-50 hover:border-indigo-300 cursor-pointer" : ""
                         }`}
-                        title={!isPdf && !reportReadOnly ? `点击替换 ${brand.name} Logo` : brand.name}
+                        title={!renderPdfMode && !reportReadOnly ? `点击替换 ${brand.name} Logo` : brand.name}
                       >
                         {!failedLogos[brand.id] ? (
                           <img
@@ -1288,7 +1569,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                           </div>
                         )}
 
-                        {!isPdf && !reportReadOnly && (
+                        {!renderPdfMode && !reportReadOnly && (
                           <>
                             <input
                               type="file"
@@ -1323,7 +1604,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   })}
               </div>
 
-              {!isPdf && reportLogoError && (
+              {!renderPdfMode && reportLogoError && (
                 <div className="-mt-3 mb-4 text-[10px] font-semibold text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">
                   {reportLogoError}
                 </div>
@@ -1369,7 +1650,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                             isBullet={true}
                           />
                         </div>
-                        {!isPdf && !reportReadOnly && (
+                        {!renderPdfMode && !reportReadOnly && (
                           <button
                             type="button"
                             onClick={() => {
@@ -1398,12 +1679,44 @@ export const ReportPage: React.FC<ReportPageProps> = ({
           </div>
         );
 
-      case 2:
-        // SLIDE 3: 各系统数据汇总
+      case 2: {
+        // SLIDE 3: 各系统数据汇总。指标列由月报编辑人自行排序并同步服务器。
+        const metricData: Record<Page3MetricKey, { prev: React.ReactNode; curr: React.ReactNode; hb: React.ReactNode; tone: string }> = {
+          online_sessions: {
+            prev: <>{compareOnlineSessions.toLocaleString()}条</>,
+            curr: <>{currentOnlineSessions.toLocaleString()}条</>,
+            hb: <>{calcHb(currentOnlineSessions, compareOnlineSessions)}</>,
+            tone: "text-[#C55A11]"
+          },
+          data_maintenance: {
+            prev: <>{metrics.prev_boh_total.toLocaleString()}次</>,
+            curr: <>{metrics.curr_boh_total.toLocaleString()}次</>,
+            hb: <>{calcHb(metrics.curr_boh_total, metrics.prev_boh_total)}</>,
+            tone: "text-[#C55A11]"
+          },
+          tickets: {
+            prev: <>{metrics.compare_month_tickets_total}单</>,
+            curr: <>{metrics.current_month_tickets_total}单</>,
+            hb: <>{calcHb(metrics.current_month_tickets_total, metrics.compare_month_tickets_total)}</>,
+            tone: "text-indigo-700"
+          },
+          backup_4g: {
+            prev: <>{metrics.prev_backup_4g}次</>,
+            curr: <>{metrics.curr_backup_4g}次</>,
+            hb: <>{calcHb(metrics.curr_backup_4g, metrics.prev_backup_4g)}</>,
+            tone: "text-indigo-700"
+          },
+          renovation: {
+            prev: <>{metrics.compare_month_renovation_count}家(旧改)<br />{metrics.compare_month_new_shops}家(新店)</>,
+            curr: <>{metrics.current_renwood_count}家(旧改)<br />{metrics.current_new_shops}家(新店)</>,
+            hb: <>{calcHb(metrics.current_renwood_count ?? 0, metrics.compare_month_renovation_count ?? 0)}(旧改)<br />{calcHb(metrics.current_new_shops ?? 0, metrics.compare_month_new_shops ?? 0)}(新店)</>,
+            tone: "text-indigo-700"
+          }
+        };
+
         return (
           <div className="w-full h-full flex flex-col justify-between px-12 py-8 bg-white relative">
             <div>
-              {/* PPT Title Header */}
               <div className="flex items-center gap-3 border-b border-slate-100 pb-3 mb-6 relative">
                 <div className="w-2.5 h-6 bg-[#2F3EE4] rounded-sm" />
                 <h2 className="text-xl font-bold text-slate-800 tracking-tight font-sans">各系统数据汇总</h2>
@@ -1413,109 +1726,61 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                 </div>
               </div>
 
-              {/* Colorful Table strictly styled as shown in user PDF Slide 3 with increased text size & padding */}
-              <div className="overflow-hidden rounded-2xl border border-slate-200/85 mb-10 shadow-xs mt-4">
-                <table className="w-full border-collapse text-center text-slate-700">
+              {!renderPdfMode && !reportReadOnly && currentUser?.role === "管理员" && (
+                <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-slate-500 mr-1">调整指标列顺序：</span>
+                  {page3MetricOrder.map((key, idx) => (
+                    <div key={key} className="inline-flex items-center rounded-lg border border-slate-200 bg-white overflow-hidden shadow-3xs">
+                      <button type="button" disabled={page3OrderBusy || idx === 0} onClick={() => handleMovePage3Metric(key, -1)} className="px-1.5 py-1 text-[10px] text-slate-400 hover:text-indigo-600 disabled:opacity-20">←</button>
+                      <span className="px-2 py-1 text-[10px] font-semibold text-slate-600 border-x border-slate-100">{PAGE3_METRIC_LABELS[key]}</span>
+                      <button type="button" disabled={page3OrderBusy || idx === page3MetricOrder.length - 1} onClick={() => handleMovePage3Metric(key, 1)} className="px-1.5 py-1 text-[10px] text-slate-400 hover:text-indigo-600 disabled:opacity-20">→</button>
+                    </div>
+                  ))}
+                  <button type="button" disabled={page3OrderBusy} onClick={() => void savePage3MetricOrder(DEFAULT_PAGE3_METRIC_ORDER)} className="ml-auto px-2 py-1 text-[10px] font-semibold text-slate-500 hover:text-indigo-600 disabled:opacity-40">{page3OrderBusy ? "保存中..." : "恢复默认"}</button>
+                </div>
+              )}
+
+              <div className="overflow-hidden rounded-2xl border border-slate-200/85 shadow-xs mt-8">
+                <table className="w-full border-collapse text-center text-slate-700 table-fixed">
                   <thead>
-                    {/* Header Row: Peach/Coral Background */}
                     <tr className="bg-[#FCE6D6] text-[#59341B] font-bold text-base border-b border-slate-200">
-                      <th className="py-5 px-5 border-r border-slate-200/60 font-sans">月份</th>
-                      <th className="py-5 px-5 border-r border-slate-200/60 font-sans">门店装修</th>
-                      <th className="py-5 px-5 border-r border-slate-200/60 font-sans">总数据维护</th>
-                      <th className="py-5 px-5 border-r border-slate-200/60 font-sans">叫修工单</th>
-                      <th className="py-5 px-5 border-r border-slate-200/60 font-sans">七鱼会话</th>
-                      <th className="py-5 px-5 border-r border-slate-200/60 font-sans">钉钉会话</th>
-                      <th className="py-5 px-5 border-slate-200/60 font-sans">4G备线接管宽带</th>
+                      <th className="py-6 px-3 border-r border-slate-200/60 font-sans w-[10%]">月份</th>
+                      {page3MetricOrder.map((key) => (
+                        <th key={key} className="py-6 px-3 border-r last:border-r-0 border-slate-200/60 font-sans">{PAGE3_METRIC_LABELS[key]}</th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {/* Previous Month Row: Soft Blue Background */}
-                    <tr className="bg-[#E8F0F8] text-slate-800 font-medium hover:bg-indigo-50/20 border-b border-slate-200/60 text-[14px]">
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-bold">{metrics.prev_month_label}</td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 leading-relaxed whitespace-pre-line">
-                        {metrics.compare_month_renovation_count}家(旧改){"\n"}{metrics.compare_month_new_shops}家(新店)
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold">
-                        {metrics.prev_boh_total.toLocaleString()}次
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold">
-                        {metrics.compare_month_tickets_total}单
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold">
-                        {metrics.compare_qiyu_raw.total.toLocaleString()}条
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold">
-                        {(metrics.prev_dingtalk_sessions ?? 0).toLocaleString()}条
-                      </td>
-                      <td className="py-6 px-5 border-slate-200/40 font-mono font-bold">
-                        {metrics.prev_backup_4g}次
-                      </td>
+                    <tr className="bg-[#E8F0F8] text-slate-800 font-medium border-b border-slate-200/60 text-[14px]">
+                      <td className="py-9 px-3 border-r border-slate-200/40 font-bold">{metrics.prev_month_label}</td>
+                      {page3MetricOrder.map((key) => (
+                        <td key={key} className="py-9 px-3 border-r last:border-r-0 border-slate-200/40 font-mono font-bold leading-relaxed">{metricData[key].prev}</td>
+                      ))}
                     </tr>
-
-                    {/* Current Month Row: Soft Blue Background */}
-                    <tr className="bg-[#E8F0F8] text-indigo-900 font-medium hover:bg-indigo-50/20 border-b border-slate-200/60 text-[14px]">
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-bold">{metrics.curr_month_label}</td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 leading-relaxed whitespace-pre-line">
-                        {metrics.current_renwood_count}家(旧改){"\n"}{metrics.current_new_shops}家(新店)
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold text-[#C55A11]">
-                        {metrics.curr_boh_total.toLocaleString()}次
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold text-indigo-700">
-                        {metrics.current_month_tickets_total}单
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold text-[#C55A11]">
-                        {metrics.current_qiyu_raw.total.toLocaleString()}条
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono font-bold text-[#C55A11]">
-                        {(metrics.curr_dingtalk_sessions ?? 0).toLocaleString()}条
-                      </td>
-                      <td className="py-6 px-5 border-slate-200/40 font-mono font-bold text-indigo-700">
-                        {metrics.curr_backup_4g}次
-                      </td>
+                    <tr className="bg-[#E8F0F8] text-indigo-900 font-medium border-b border-slate-200/60 text-[14px]">
+                      <td className="py-9 px-3 border-r border-slate-200/40 font-bold">{metrics.curr_month_label}</td>
+                      {page3MetricOrder.map((key) => (
+                        <td key={key} className={`py-9 px-3 border-r last:border-r-0 border-slate-200/40 font-mono font-bold leading-relaxed ${metricData[key].tone}`}>{metricData[key].curr}</td>
+                      ))}
                     </tr>
-
-                    {/* MOM Row: Soft Blue Background */}
-                    <tr className="bg-[#E8F0F8] text-slate-800 font-bold hover:bg-indigo-50/20 text-[14px]">
-                      <td className="py-6 px-5 border-r border-slate-200/40">环比</td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono text-indigo-600 leading-relaxed whitespace-pre-line">
-                        {calcHb(metrics.current_renwood_count ?? 0, metrics.compare_month_renovation_count ?? 0)}(旧改)
-                        {"\n"}
-                        {calcHb(metrics.current_new_shops ?? 0, metrics.compare_month_new_shops ?? 0)}(新店)
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono text-[#C55A11]">
-                        {calcHb(metrics.curr_boh_total, metrics.prev_boh_total)}
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono text-indigo-600">
-                        {calcHb(metrics.current_month_tickets_total, metrics.compare_month_tickets_total)}
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono text-[#C55A11]">
-                        {calcHb(metrics.current_qiyu_raw.total, metrics.compare_qiyu_raw.total)}
-                      </td>
-                      <td className="py-6 px-5 border-r border-slate-200/40 font-mono text-[#C55A11]">
-                        {calcHb(metrics.curr_dingtalk_sessions ?? 0, metrics.prev_dingtalk_sessions ?? 0)}
-                      </td>
-                      <td className="py-6 px-5 border-slate-200/40 font-mono text-indigo-600">
-                        {calcHb(metrics.curr_backup_4g, metrics.prev_backup_4g)}
-                      </td>
+                    <tr className="bg-[#E8F0F8] text-slate-800 font-bold text-[14px]">
+                      <td className="py-8 px-3 border-r border-slate-200/40">环比</td>
+                      {page3MetricOrder.map((key) => (
+                        <td key={key} className={`py-8 px-3 border-r last:border-r-0 border-slate-200/40 font-mono leading-relaxed ${metricData[key].tone}`}>{metricData[key].hb}</td>
+                      ))}
                     </tr>
                   </tbody>
                 </table>
               </div>
-
-              {/* Note in explicit blue as shown in Slide 3 */}
-              <div className="text-sm text-[#0066FF] font-medium leading-relaxed bg-blue-50/50 border border-blue-200/60 rounded-2xl p-5 mb-14 shadow-3xs">
-                🔹 <b>注：</b> “叫修工单”指通过叫修小程序下单的IT硬件问题；“七鱼会话”指门店服务台实时咨询；“钉钉会话”指钉钉门店群的线上咨询。
-              </div>
             </div>
 
-            {/* Bottom Footer */}
             <div className="text-[10px] text-slate-400 border-t border-slate-100 pt-3 flex justify-between font-mono">
               <span></span>
               <span>CONFIDENTIAL</span>
             </div>
           </div>
         );
+      }
 
       case 3:
         // SLIDE 4: 线上咨询问题分析
@@ -1537,13 +1802,21 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                 <h4 className="text-sm font-bold text-slate-700">
                   📊 {metrics.curr_month_label}门店问题分析
                 </h4>
+                <div className="mt-1.5 flex items-center justify-center gap-4 text-[10px] text-slate-500">
+                  <span>左柱 {metrics.prev_month_label}</span>
+                  <span>右柱 {metrics.curr_month_label}</span>
+                  <span className="inline-flex items-center gap-1"><i className="w-2.5 h-2.5 bg-[#5B9BD5] inline-block rounded-sm" />七鱼</span>
+                  <span className="inline-flex items-center gap-1"><i className="w-2.5 h-2.5 bg-[#C55A11] inline-block rounded-sm" />钉钉</span>
+                </div>
               </div>
 
               {/* Chart container */}
               <div className="h-[310px] w-full mb-5">
                 <QiyuCategoriesChart
-                  current={metrics.current_categories}
-                  compare={metrics.compare_categories}
+                  currentQiyu={currentQiyuCategories}
+                  currentDingtalk={currentDingtalkCategorySupplement}
+                  compareQiyu={compareQiyuCategories}
+                  compareDingtalk={compareDingtalkCategorySupplement}
                   prevLabel={metrics.prev_month_label}
                   currLabel={metrics.curr_month_label}
                 />
@@ -1556,6 +1829,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
+                  {!renderPdfMode && !reportReadOnly && (
+                    <NormalizeFormatButton
+                      onClick={() => applyUnifiedCommentaryFormat("slide4Comment", slide4Comment, saveSlide4Comment)}
+                    />
+                  )}
                 </div>
                 <CollaborativeInput
                   value={slide4Comment}
@@ -1599,13 +1877,13 @@ export const ReportPage: React.FC<ReportPageProps> = ({
               </div>
 
               <div className="grid grid-cols-12 gap-6 mb-5">
-                {/* Horizontal Bar Chart (4月、5月会话对比) */}
+                {/* 左侧：线上会话规模（七鱼 + 钉钉） */}
                 <div className="col-span-6 flex flex-col justify-between">
-                  <span className="text-xs font-bold text-slate-600 block mb-2.5 text-center">📊 {metrics.prev_month_label}、{metrics.curr_month_label}会话对比</span>
+                  <span className="text-xs font-bold text-slate-600 block mb-2.5 text-center">📊 {metrics.prev_month_label}、{metrics.curr_month_label}线上会话规模</span>
                   <div className="h-[325px] w-full">
                     <QiyuCompareChart
-                      current={metrics.current_qiyu_raw}
-                      compare={metrics.compare_qiyu_raw}
+                      current={currentServiceDeskVolume}
+                      compare={compareServiceDeskVolume}
                       prevLabel={metrics.prev_month_label}
                       currLabel={metrics.curr_month_label}
                     />
@@ -1723,6 +2001,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
+                  {!renderPdfMode && !reportReadOnly && (
+                    <NormalizeFormatButton
+                      onClick={() => applyUnifiedCommentaryFormat("slide5Comment", slide5Comment, saveSlide5Comment)}
+                    />
+                  )}
                 </div>
                 <CollaborativeInput
                   value={slide5Comment}
@@ -1832,6 +2115,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
+                  {!renderPdfMode && !reportReadOnly && (
+                    <NormalizeFormatButton
+                      onClick={() => applyUnifiedCommentaryFormat("slide6Comment", slide6Comment, saveSlide6Comment)}
+                    />
+                  )}
                 </div>
                 <CollaborativeInput
                   value={slide6Comment}
@@ -1944,6 +2232,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
+                  {!renderPdfMode && !reportReadOnly && (
+                    <NormalizeFormatButton
+                      onClick={() => applyUnifiedCommentaryFormat("slide7Comment", slide7Comment, saveSlide7Comment)}
+                    />
+                  )}
                 </div>
                 <CollaborativeInput
                   value={slide7Comment}
@@ -2016,6 +2309,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                     <div className="w-1.5 h-3 bg-[#C55A11] rounded-xs" />
                     <span>分析 &amp; 优化措施:</span>
                   </h3>
+                  {!renderPdfMode && !reportReadOnly && (
+                    <NormalizeFormatButton
+                      onClick={() => applyUnifiedCommentaryFormat("slide8Comment", slide8Comment, saveSlide8Comment)}
+                    />
+                  )}
                 </div>
                 <CollaborativeInput
                   value={slide8Comment}
@@ -2148,6 +2446,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
               )}
               {snapshotActionError && (
                 <div className="text-[11px] text-rose-600 font-semibold mt-1">{snapshotActionError}</div>
+              )}
+              {legacyRestoreNotice && (
+                <div className="text-[11px] text-emerald-700 font-semibold mt-1 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                  {legacyRestoreNotice}
+                </div>
               )}
             </div>
             <div className="flex items-center gap-2 flex-none">
@@ -2397,7 +2700,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
             {Array.from({ length: totalSlides }).map((_, idx) => (
               <div key={idx} className="print-slide-page">
                 <div className="print-slide-content">
-                  {renderSlide(idx)}
+                  {renderSlide(idx, true)}
                 </div>
               </div>
             ))}
@@ -2434,7 +2737,7 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   display: "block"
                 }}
               >
-                {renderSlide(idx)}
+                {renderSlide(idx, true)}
               </div>
             ))}
           </div>
