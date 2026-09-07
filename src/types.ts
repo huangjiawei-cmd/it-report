@@ -129,6 +129,8 @@ export interface ReportMetrics {
   compare_month_qiyu_valid: number;
   current_qiyu_raw: QiyuRaw;
   compare_qiyu_raw: QiyuRaw;
+  current_qiyu_original_categories?: Record<string, number>;
+  current_qiyu_category_overrides?: Record<string, number>;
   current_qiyu_categories?: Record<string, number>;
   compare_qiyu_categories?: Record<string, number>;
   current_dingtalk_qiyu_supplement?: Record<string, number>;

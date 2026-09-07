@@ -536,7 +536,8 @@ async function startServer() {
     "prev_new_shops",
     "curr_boh_data",
     "prev_boh_data",
-    "dingtalk_qiyu_supplement"
+    "dingtalk_qiyu_supplement",
+    "qiyu_category_overrides"
   ] as const;
 
   const pickSharedMonthConfig = (source: any) => {
@@ -548,7 +549,7 @@ async function startServer() {
     return result;
   };
 
-  const APP_RELEASE = "1.5.4-online-session-layout";
+  const APP_RELEASE = "1.5.5-history-qiyu-revision";
   const REPORT_LOGO_IDS = new Set(["jiumaojiu", "taier", "song", "group"]);
   const MAX_REPORT_LOGO_DATA_URL_LENGTH = 3_600_000;
 
@@ -611,6 +612,46 @@ async function startServer() {
       } else {
         result[key] = parsed;
       }
+    }
+    return result;
+  };
+
+  const normalizeQiyuCategoryOverrides = (value: any, strict = false) => {
+    let source = value;
+    if (typeof value === "string") {
+      try {
+        source = value.trim() ? JSON.parse(value) : {};
+      } catch (e) {
+        if (strict) throw new Error("七鱼分类人工修订数据格式非法");
+        source = {};
+      }
+    }
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      if (strict) throw new Error("七鱼分类人工修订数据格式非法");
+      source = {};
+    }
+    const result: Record<string, number> = {};
+    for (const key of QIYU_CATEGORY_KEYS) {
+      if (source[key] === undefined || source[key] === null || source[key] === "") continue;
+      const parsed = Number(source[key]);
+      if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+        if (strict) throw new Error(`${key} 的七鱼人工修订值必须是非负整数`);
+        continue;
+      }
+      result[key] = parsed;
+    }
+    return result;
+  };
+
+  const applyQiyuCategoryOverrides = (
+    base: Record<string, number> | null | undefined,
+    overrides: Record<string, number> | null | undefined
+  ) => {
+    const result = emptyQiyuCategoryMap();
+    for (const key of QIYU_CATEGORY_KEYS) {
+      result[key] = overrides?.[key] !== undefined
+        ? Number(overrides[key])
+        : Number(base?.[key] || 0);
     }
     return result;
   };
@@ -1388,6 +1429,16 @@ async function startServer() {
           );
         } catch (e: any) {
           return res.status(400).json({ error: e.message || "钉钉群会话补充数据格式非法" });
+        }
+      }
+      if (cleanPatch.qiyu_category_overrides !== undefined) {
+        try {
+          cleanPatch.qiyu_category_overrides = normalizeQiyuCategoryOverrides(
+            cleanPatch.qiyu_category_overrides,
+            true
+          );
+        } catch (e: any) {
+          return res.status(400).json({ error: e.message || "七鱼分类人工修订数据格式非法" });
         }
       }
       if (Object.keys(cleanPatch).length === 0) {
@@ -2484,7 +2535,8 @@ echo "=================================================="
         prev_new_shops,
         curr_boh_json,
         prev_boh_json,
-        dingtalk_qiyu_supplement_json
+        dingtalk_qiyu_supplement_json,
+        qiyu_category_overrides_json
       } = req.body;
 
       if (!month || !/^\d{4}-\d{2}$/.test(month)) {
@@ -2521,12 +2573,16 @@ echo "=================================================="
       const cachedSnapshotMeta = getSnapshotMeta(cachedConfig);
       const submittedBaseRevision = isSubmit ? Number(req.body.base_revision) : null;
       let currentDingtalkQiyuSupplement: Record<string, number>;
+      let currentQiyuCategoryOverrides: Record<string, number>;
       try {
         currentDingtalkQiyuSupplement = dingtalk_qiyu_supplement_json !== undefined
           ? normalizeDingtalkQiyuSupplement(dingtalk_qiyu_supplement_json, true)
           : normalizeDingtalkQiyuSupplement(cachedConfig.dingtalk_qiyu_supplement || {});
+        currentQiyuCategoryOverrides = qiyu_category_overrides_json !== undefined
+          ? normalizeQiyuCategoryOverrides(qiyu_category_overrides_json, true)
+          : normalizeQiyuCategoryOverrides(cachedConfig.qiyu_category_overrides || {});
       } catch (e: any) {
-        return res.status(400).json({ detail: e.message || "钉钉群会话补充数据格式非法" });
+        return res.status(400).json({ detail: e.message || "七鱼/钉钉分类修订数据格式非法" });
       }
 
       if (isSubmit) {
@@ -2790,9 +2846,14 @@ echo "=================================================="
         }
       }
 
-      // “线上咨询问题分析”统一使用：七鱼原始分类 + 钉钉群人工补充。
-      // 原始七鱼、人工补充、最终合计分别保留，便于后续审计和问题追溯。
-      const currentCombinedCategories = addCategoryMaps(qiyu_categories_current, currentDingtalkQiyuSupplement);
+      // “线上咨询问题分析”统一使用：七鱼解析原始值 -> 可选人工修订 -> 钉钉群人工补充。
+      // 三层分别保留，便于历史账期修订时追溯原始解析值与人工调整值。
+      const currentQiyuOriginalCategories = cloneJson(qiyu_categories_current);
+      const currentQiyuEffectiveCategories = applyQiyuCategoryOverrides(
+        currentQiyuOriginalCategories,
+        currentQiyuCategoryOverrides
+      );
+      const currentCombinedCategories = addCategoryMaps(currentQiyuEffectiveCategories, currentDingtalkQiyuSupplement);
       const compareCombinedCategories = inheritedCombinedCategories
         ? cloneJson(inheritedCombinedCategories)
         : addCategoryMaps(qiyu_categories_compare, compareDingtalkQiyuSupplement);
@@ -3268,6 +3329,7 @@ echo "=================================================="
           curr_boh_data,
           prev_boh_data,
           dingtalk_qiyu_supplement: currentDingtalkQiyuSupplement,
+          qiyu_category_overrides: currentQiyuCategoryOverrides,
           _revision: Number(existingMonthConfig._revision || 0) + 1,
           _updated_at: new Date().toISOString(),
           _updated_by: req.user?.username || existingMonthConfig._updated_by || "unknown"
@@ -3296,7 +3358,9 @@ echo "=================================================="
         compare_month_qiyu_valid: compare_qiyu_raw.valid,
         current_qiyu_raw,
         compare_qiyu_raw,
-        current_qiyu_categories: cloneJson(qiyu_categories_current),
+        current_qiyu_original_categories: cloneJson(currentQiyuOriginalCategories),
+        current_qiyu_category_overrides: cloneJson(currentQiyuCategoryOverrides),
+        current_qiyu_categories: cloneJson(currentQiyuEffectiveCategories),
         compare_qiyu_categories: cloneJson(qiyu_categories_compare),
         current_dingtalk_qiyu_supplement: cloneJson(currentDingtalkQiyuSupplement),
         compare_dingtalk_qiyu_supplement: cloneJson(compareDingtalkQiyuSupplement),

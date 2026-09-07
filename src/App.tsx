@@ -57,6 +57,7 @@ const QIYU_CATEGORY_KEYS = [
 
 type QiyuCategoryKey = typeof QIYU_CATEGORY_KEYS[number];
 type QiyuCategoryMap = Record<QiyuCategoryKey, number>;
+type QiyuCategoryOverrides = Partial<Record<QiyuCategoryKey, number>>;
 
 const createEmptyQiyuCategoryMap = (): QiyuCategoryMap => Object.fromEntries(
   QIYU_CATEGORY_KEYS.map((key) => [key, 0])
@@ -68,6 +69,17 @@ const normalizeQiyuCategoryMap = (value: any): QiyuCategoryMap => {
   for (const key of QIYU_CATEGORY_KEYS) {
     const parsed = Number(value[key] ?? 0);
     result[key] = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+  }
+  return result;
+};
+
+const normalizeQiyuCategoryOverrides = (value: any): QiyuCategoryOverrides => {
+  const result: QiyuCategoryOverrides = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+  for (const key of QIYU_CATEGORY_KEYS) {
+    if (value[key] === undefined || value[key] === null || value[key] === "") continue;
+    const parsed = Number(value[key]);
+    if (Number.isFinite(parsed) && parsed >= 0) result[key] = Math.floor(parsed);
   }
   return result;
 };
@@ -699,6 +711,7 @@ export default function App() {
   // 4. 客服会话 Excel 文件上传状态
   const [currQiyuFile, setCurrQiyuFile] = useState<File | null>(null);
   const [dingtalkQiyuSupplement, setDingtalkQiyuSupplement] = useState<QiyuCategoryMap>(() => createEmptyQiyuCategoryMap());
+  const [qiyuCategoryOverrides, setQiyuCategoryOverrides] = useState<QiyuCategoryOverrides>({});
 
   // 七鱼文件严格绑定当前账期；切换月份时清空选择，避免误把上一个月的文件提交到新账期。
   useEffect(() => {
@@ -830,11 +843,38 @@ export default function App() {
   };
 
   const getQiyuBaseCategoryValue = (key: QiyuCategoryKey) => {
+    if (qiyuCategoryOverrides[key] !== undefined) return Number(qiyuCategoryOverrides[key] || 0);
+    const explicitOriginal = metrics?.current_qiyu_original_categories?.[key];
+    if (explicitOriginal !== undefined) return Number(explicitOriginal || 0);
     const explicitRaw = metrics?.current_qiyu_categories?.[key];
     if (explicitRaw !== undefined) return Number(explicitRaw || 0);
     const combined = Number(metrics?.current_categories?.[key] || 0);
     const metricSupplement = Number(metrics?.current_dingtalk_qiyu_supplement?.[key] || 0);
     return Math.max(0, combined - metricSupplement);
+  };
+
+  const getQiyuOriginalCategoryValue = (key: QiyuCategoryKey) => {
+    const explicitOriginal = metrics?.current_qiyu_original_categories?.[key];
+    if (explicitOriginal !== undefined) return Number(explicitOriginal || 0);
+    const effective = metrics?.current_qiyu_categories?.[key];
+    if (effective !== undefined) return Number(effective || 0);
+    const combined = Number(metrics?.current_categories?.[key] || 0);
+    const metricSupplement = Number(metrics?.current_dingtalk_qiyu_supplement?.[key] || 0);
+    return Math.max(0, combined - metricSupplement);
+  };
+
+  const handleQiyuCategoryOverrideChange = (key: QiyuCategoryKey, rawValue: string) => {
+    const parsed = Number(rawValue);
+    const safeValue = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+    setQiyuCategoryOverrides((prev) => ({ ...prev, [key]: safeValue }));
+  };
+
+  const clearQiyuCategoryOverride = (key: QiyuCategoryKey) => {
+    setQiyuCategoryOverrides((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
   const handleDingtalkQiyuSupplementChange = (key: QiyuCategoryKey, rawValue: string) => {
@@ -897,6 +937,7 @@ export default function App() {
     formData.append("curr_boh_json", JSON.stringify(currBoh));
     formData.append("prev_boh_json", JSON.stringify(prevBoh));
     formData.append("dingtalk_qiyu_supplement_json", JSON.stringify(dingtalkQiyuSupplement));
+    formData.append("qiyu_category_overrides_json", JSON.stringify(qiyuCategoryOverrides));
     formData.append("is_submit", "true");
     if (sharedBaselineRef.current?.month === month) {
       formData.append("base_revision", String(sharedBaselineRef.current.revision));
@@ -995,6 +1036,9 @@ export default function App() {
           if (cfg.dingtalk_qiyu_supplement !== undefined) {
             setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement));
           }
+          if (cfg.qiyu_category_overrides !== undefined) {
+            setQiyuCategoryOverrides(normalizeQiyuCategoryOverrides(cfg.qiyu_category_overrides));
+          }
           if (cfg.curr_boh_data !== undefined) setCurrBoh(cfg.curr_boh_data);
           if (cfg.prev_boh_data !== undefined) setPrevBoh(cfg.prev_boh_data);
         }
@@ -1020,6 +1064,9 @@ export default function App() {
       if (resData.metrics.compare_month_new_shops !== undefined) setPrevNewShops(resData.metrics.compare_month_new_shops);
       if (resData.metrics.current_dingtalk_qiyu_supplement !== undefined) {
         setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(resData.metrics.current_dingtalk_qiyu_supplement));
+      }
+      if (resData.data_source !== "working_snapshot" && resData.metrics.current_qiyu_category_overrides !== undefined) {
+        setQiyuCategoryOverrides(normalizeQiyuCategoryOverrides(resData.metrics.current_qiyu_category_overrides));
       }
       if (resData.metrics.curr_boh_data) setCurrBoh(resData.metrics.curr_boh_data);
       if (resData.metrics.prev_boh_data) setPrevBoh(resData.metrics.prev_boh_data);
@@ -1262,6 +1309,10 @@ export default function App() {
       "dingtalk_qiyu_supplement_json",
       getDraftStr("dingtalk_qiyu_supplement", JSON.stringify(createEmptyQiyuCategoryMap()))
     );
+    formData.append(
+      "qiyu_category_overrides_json",
+      getDraftStr("qiyu_category_overrides", JSON.stringify({}))
+    );
 
     const defaultPrevBoh = {
       "太二": { "堂食": 3816, "外卖": 2144, "营销活动": 317 },
@@ -1451,6 +1502,9 @@ export default function App() {
     const dingtalkQiyuSupplementVal = normalizeQiyuCategoryMap(
       getDraft(targetMonth, "dingtalk_qiyu_supplement", createEmptyQiyuCategoryMap())
     );
+    const qiyuCategoryOverridesVal = normalizeQiyuCategoryOverrides(
+      getDraft(targetMonth, "qiyu_category_overrides", {})
+    );
 
     setCurrBackup4g(currBackup4gVal);
     setCurrDingTalkSessions(currDingTalkVal);
@@ -1458,6 +1512,7 @@ export default function App() {
     setCurrNewShops(currNewShopsVal);
     setCurrBoh(currBohVal);
     setDingtalkQiyuSupplement(dingtalkQiyuSupplementVal);
+    setQiyuCategoryOverrides(qiyuCategoryOverridesVal);
 
     setLoadedMonth(targetMonth);
     stateMonthRef.current = targetMonth;
@@ -1473,7 +1528,8 @@ export default function App() {
       curr_new_shops: currNewShopsVal,
       prev_renwood_count: prevRenwoodVal,
       prev_new_shops: prevNewShopsVal,
-      dingtalk_qiyu_supplement: dingtalkQiyuSupplementVal
+      dingtalk_qiyu_supplement: dingtalkQiyuSupplementVal,
+      qiyu_category_overrides: qiyuCategoryOverridesVal
     };
   }, []);
 
@@ -1516,6 +1572,7 @@ export default function App() {
               prev_renwood_count: cfg.prev_renwood_count !== undefined ? cfg.prev_renwood_count : "",
               prev_new_shops: cfg.prev_new_shops !== undefined ? cfg.prev_new_shops : "",
               dingtalk_qiyu_supplement: normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement || {}),
+              qiyu_category_overrides: normalizeQiyuCategoryOverrides(cfg.qiyu_category_overrides || {}),
               curr_boh: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : emptyBoh,
               prev_boh: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : emptyBoh
             };
@@ -1537,6 +1594,7 @@ export default function App() {
         prev_renwood_count: mergedDrafts.prev_renwood_count,
         prev_new_shops: mergedDrafts.prev_new_shops,
         dingtalk_qiyu_supplement: normalizeQiyuCategoryMap(mergedDrafts.dingtalk_qiyu_supplement || {}),
+        qiyu_category_overrides: normalizeQiyuCategoryOverrides(mergedDrafts.qiyu_category_overrides || {}),
         curr_boh_data: mergedDrafts.curr_boh,
         prev_boh_data: mergedDrafts.prev_boh
       };
@@ -1559,6 +1617,7 @@ export default function App() {
       setCurrNewShops(mergedDrafts.curr_new_shops);
       setCurrBoh(mergedDrafts.curr_boh);
       setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(mergedDrafts.dingtalk_qiyu_supplement || {}));
+      setQiyuCategoryOverrides(normalizeQiyuCategoryOverrides(mergedDrafts.qiyu_category_overrides || {}));
       setLoadedMonth(month);
       stateMonthRef.current = month;
 
@@ -1592,6 +1651,7 @@ export default function App() {
       localStorage.setItem(`draft_${month}_curr_renwood_count`, String(currRenovation));
       localStorage.setItem(`draft_${month}_curr_new_shops`, String(currNewShops));
       localStorage.setItem(`draft_${month}_dingtalk_qiyu_supplement`, JSON.stringify(dingtalkQiyuSupplement));
+      localStorage.setItem(`draft_${month}_qiyu_category_overrides`, JSON.stringify(qiyuCategoryOverrides));
 
       // 多人共享草稿：初始化完成后仅上传真正发生变化的字段，页面打开/刷新不会全量回写。
       if (isAuthenticated && canEditMonth && sharedHydratedMonthRef.current === month) {
@@ -1605,6 +1665,7 @@ export default function App() {
           prev_renwood_count: prevRenovation,
           prev_new_shops: prevNewShops,
           dingtalk_qiyu_supplement: dingtalkQiyuSupplement,
+          qiyu_category_overrides: qiyuCategoryOverrides,
           curr_boh_data: currBoh,
           prev_boh_data: prevBoh
         };
@@ -1652,6 +1713,9 @@ export default function App() {
                 if (cfg.prev_new_shops !== undefined) setPrevNewShops(cfg.prev_new_shops);
                 if (cfg.dingtalk_qiyu_supplement !== undefined) {
                   setDingtalkQiyuSupplement(normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement));
+                }
+                if (cfg.qiyu_category_overrides !== undefined) {
+                  setQiyuCategoryOverrides(normalizeQiyuCategoryOverrides(cfg.qiyu_category_overrides));
                 }
                 if (cfg.curr_boh_data !== undefined) setCurrBoh(cfg.curr_boh_data);
                 if (cfg.prev_boh_data !== undefined) setPrevBoh(cfg.prev_boh_data);
@@ -1708,7 +1772,8 @@ export default function App() {
     prevNewShops,
     currRenovation,
     currNewShops,
-    dingtalkQiyuSupplement
+    dingtalkQiyuSupplement,
+    qiyuCategoryOverrides
   ]);
 
   // 9.7. 审计日志：手动修改账期核心数据增量监听器
@@ -2580,24 +2645,50 @@ export default function App() {
             </div>
 
             <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-              <div className="min-w-[640px]">
-                <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.8fr] bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-500">
+              <div className="min-w-[820px]">
+                <div className="grid grid-cols-[1.45fr_0.8fr_1fr_1fr_0.8fr] bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-500">
                   <div className="px-4 py-2.5">咨询分类</div>
                   <div className="px-3 py-2.5 text-center">七鱼原始</div>
+                  <div className="px-3 py-2.5 text-center">七鱼修订</div>
                   <div className="px-3 py-2.5 text-center">钉钉补充</div>
                   <div className="px-3 py-2.5 text-center">报表合计</div>
                 </div>
                 {QIYU_CATEGORY_KEYS.map((key) => {
+                  const originalQiyuValue = getQiyuOriginalCategoryValue(key);
                   const qiyuValue = getQiyuBaseCategoryValue(key);
                   const supplementValue = dingtalkQiyuSupplement[key] || 0;
                   const combinedValue = qiyuValue + supplementValue;
                   return (
                     <div
                       key={key}
-                      className="grid grid-cols-[1.5fr_0.8fr_1fr_0.8fr] items-center border-b border-slate-100 last:border-b-0 text-xs"
+                      className="grid grid-cols-[1.45fr_0.8fr_1fr_1fr_0.8fr] items-center border-b border-slate-100 last:border-b-0 text-xs"
                     >
                       <div className="px-4 py-2.5 font-semibold text-slate-700">{key}</div>
-                      <div className="px-3 py-2.5 text-center font-mono text-slate-500">{qiyuValue}</div>
+                      <div className="px-3 py-2.5 text-center font-mono text-slate-500">{originalQiyuValue}</div>
+                      <div className="px-3 py-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            inputMode="numeric"
+                            value={qiyuValue}
+                            onChange={(e) => handleQiyuCategoryOverrideChange(key, e.target.value)}
+                            className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-center font-mono text-xs text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 disabled:bg-slate-100 disabled:text-slate-400"
+                            aria-label={`${key}七鱼人工修订值`}
+                          />
+                          {qiyuCategoryOverrides[key] !== undefined && (
+                            <button
+                              type="button"
+                              onClick={() => clearQiyuCategoryOverride(key)}
+                              className="shrink-0 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-1 text-[9px] font-semibold text-slate-500 hover:border-indigo-300 hover:text-indigo-600"
+                              title="恢复为七鱼原始解析值"
+                            >
+                              原始
+                            </button>
+                          )}
+                        </div>
+                      </div>
                       <div className="px-3 py-1.5">
                         <input
                           type="number"
@@ -2618,7 +2709,7 @@ export default function App() {
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-slate-400">
-              <span>仅填写非负整数；没有补充时保持 0。</span>
+              <span>七鱼修订、钉钉补充均填写非负整数；“原始”可恢复七鱼解析值。</span>
               <span>修改后约 0.8 秒自动保存服务器，重新生成月报后进入图表。</span>
               <span>上月图表对比值继承上月已生成/归档的合计口径。</span>
             </div>

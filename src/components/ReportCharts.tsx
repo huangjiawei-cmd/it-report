@@ -156,6 +156,26 @@ export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
   // Sort descending by current month values
   data.sort((a, b) => b.currTotal - a.currTotal);
 
+  const renderStackTotalLabel = (
+    totalKey: "prevTotal" | "currTotal",
+    upperKey: "prevDingtalk" | "currDingtalk",
+    renderOnUpper: boolean
+  ) => (props: any) => {
+    const index = Number(props?.index ?? -1);
+    const row = data[index];
+    if (!row) return null;
+    const upperValue = Number(row[upperKey] || 0);
+    if (renderOnUpper ? upperValue <= 0 : upperValue > 0) return null;
+    const total = Number(row[totalKey] || 0);
+    const x = Number(props?.x || 0) + Number(props?.width || 0) / 2;
+    const y = Number(props?.y || 0) - 8;
+    return (
+      <text x={x} y={y} textAnchor="middle" fill="#1e293b" fontSize={12} fontWeight={700}>
+        {total}
+      </text>
+    );
+  };
+
   return (
     <ResponsiveContainer width="100%" height="100%" pdfWidth={1024} pdfHeight={310}>
       <BarChart 
@@ -175,7 +195,9 @@ export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
           fill={COLOR_COMP_BLUE}
           barSize={18}
           isAnimationActive={false}
-        />
+        >
+          <LabelList content={renderStackTotalLabel("prevTotal", "prevDingtalk", false)} />
+        </Bar>
         <Bar
           dataKey="prevDingtalk"
           name={`${prevLabel} · 钉钉`}
@@ -185,7 +207,7 @@ export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
           barSize={18}
           isAnimationActive={false}
         >
-          <LabelList dataKey="prevTotal" position="top" content={renderCustomBarLabel as any} />
+          <LabelList content={renderStackTotalLabel("prevTotal", "prevDingtalk", true)} />
         </Bar>
         <Bar
           dataKey="currQiyu"
@@ -194,7 +216,9 @@ export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
           fill={COLOR_COMP_BLUE}
           barSize={18}
           isAnimationActive={false}
-        />
+        >
+          <LabelList content={renderStackTotalLabel("currTotal", "currDingtalk", false)} />
+        </Bar>
         <Bar
           dataKey="currDingtalk"
           name={`${currLabel} · 钉钉`}
@@ -204,7 +228,7 @@ export const QiyuCategoriesChart: React.FC<QiyuCategoriesProps> = ({
           barSize={18}
           isAnimationActive={false}
         >
-          <LabelList dataKey="currTotal" position="top" content={renderCustomBarLabel as any} />
+          <LabelList content={renderStackTotalLabel("currTotal", "currDingtalk", true)} />
         </Bar>
       </BarChart>
     </ResponsiveContainer>
