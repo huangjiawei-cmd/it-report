@@ -1616,11 +1616,38 @@ export const ReportPage: React.FC<ReportPageProps> = ({
                   <h3 className="text-xs uppercase font-bold text-slate-500 tracking-wider flex items-center gap-2">
                     <span>📋 本月核心结论概要</span>
                   </h3>
+                  {!renderPdfMode && !reportReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = [...slide2Bullets, "点击此处编辑新增结论..."];
+                        setSlide2Bullets(next);
+                        saveBullets(next);
+                      }}
+                      className="text-indigo-600 hover:text-indigo-800 font-semibold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-md transition cursor-pointer shadow-3xs text-[11px]"
+                      title="新增一条本月核心结论"
+                    >
+                      + 新增结论
+                    </button>
+                  )}
                 </div>
 
                 {slide2Bullets.length === 0 ? (
                   <div className="py-6 text-center border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
                     <p className="text-xs text-slate-500 mb-3">当前月份暂无核心结论条目</p>
+                    {!renderPdfMode && !reportReadOnly && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = ["点击此处编辑新增结论..."];
+                          setSlide2Bullets(next);
+                          saveBullets(next);
+                        }}
+                        className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-4 py-2 rounded-xl transition cursor-pointer shadow-sm"
+                      >
+                        + 新增第一条结论
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <ul className="space-y-3.5">
