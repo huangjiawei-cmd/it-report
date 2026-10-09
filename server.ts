@@ -549,7 +549,7 @@ async function startServer() {
     return result;
   };
 
-  const APP_RELEASE = "1.5.5-history-qiyu-revision";
+  const APP_RELEASE = "1.5.6-stability-inheritance-ticket-filter";
   const REPORT_LOGO_IDS = new Set(["jiumaojiu", "taier", "song", "group"]);
   const MAX_REPORT_LOGO_DATA_URL_LENGTH = 3_600_000;
 
@@ -774,7 +774,13 @@ async function startServer() {
     };
   };
 
-  const getHistoricalDingtalkTotal = (config: any): number | null => {
+  const hasMeaningfulScalar = (value: any) => value !== undefined && value !== null && value !== "";
+
+  const getHistoricalNumericMetric = (
+    config: any,
+    metricKeys: string[],
+    configKey: string
+  ): number | null => {
     if (!config || typeof config !== "object") return null;
     const snapshotMeta = getSnapshotMeta(config);
     const candidates: any[] = [];
@@ -789,16 +795,55 @@ async function startServer() {
       if (item?.metrics) candidates.push(item.metrics);
     }
     for (const metrics of candidates) {
-      if (metrics?.curr_dingtalk_sessions !== undefined && metrics?.curr_dingtalk_sessions !== null) {
-        const parsed = Number(metrics.curr_dingtalk_sessions);
-        if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+      for (const key of metricKeys) {
+        if (hasMeaningfulScalar(metrics?.[key])) {
+          const parsed = Number(metrics[key]);
+          if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+        }
       }
     }
-    if (config.curr_dingtalk_sessions !== undefined && config.curr_dingtalk_sessions !== null) {
-      const parsed = Number(config.curr_dingtalk_sessions);
+    if (hasMeaningfulScalar(config?.[configKey])) {
+      const parsed = Number(config[configKey]);
       if (Number.isFinite(parsed) && parsed >= 0) return parsed;
     }
     return null;
+  };
+
+  const getHistoricalDingtalkTotal = (config: any): number | null =>
+    getHistoricalNumericMetric(config, ["curr_dingtalk_sessions"], "curr_dingtalk_sessions");
+
+  const getPreviousMonthKey = (month: string) => {
+    if (!/^\d{4}-\d{2}$/.test(month)) return null;
+    const [year, monthNumber] = month.split("-").map(Number);
+    const date = new Date(year, monthNumber - 2, 1);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  };
+
+  const getEffectiveSharedMonthConfig = (month: string, monthConfig: any, storage: any) => {
+    const result = pickSharedMonthConfig(monthConfig);
+    const prevMonth = getPreviousMonthKey(month);
+    const prevConfig = prevMonth ? storage?.month_configs?.[prevMonth] : null;
+    if (!prevConfig) return result;
+
+    const inheritIfBlank = (key: string, value: number | null) => {
+      if (!hasMeaningfulScalar(result[key]) && value !== null) result[key] = value;
+    };
+
+    inheritIfBlank(
+      "prev_backup_4g",
+      getHistoricalNumericMetric(prevConfig, ["curr_backup_4g"], "curr_backup_4g")
+    );
+    inheritIfBlank("prev_dingtalk_sessions", getHistoricalDingtalkTotal(prevConfig));
+    inheritIfBlank(
+      "prev_renwood_count",
+      getHistoricalNumericMetric(prevConfig, ["current_renwood_count", "curr_renwood_count"], "curr_renwood_count")
+    );
+    inheritIfBlank(
+      "prev_new_shops",
+      getHistoricalNumericMetric(prevConfig, ["current_new_shops", "curr_new_shops"], "curr_new_shops")
+    );
+
+    return result;
   };
 
   const markSnapshotStale = (config: any, reason: string, username?: string) => {
@@ -1391,7 +1436,7 @@ async function startServer() {
       const monthConfig = storage.month_configs?.[month];
       return res.json({
         exists: !!monthConfig,
-        config: pickSharedMonthConfig(monthConfig),
+        config: getEffectiveSharedMonthConfig(month, monthConfig, storage),
         revision: Number(monthConfig?._revision || 0),
         updatedAt: monthConfig?._updated_at || null,
         updatedBy: monthConfig?._updated_by || null,
@@ -2692,10 +2737,23 @@ echo "=================================================="
       const prevConfig = storage.month_configs[prevMonthStr];
       if (prev_backup_4g !== undefined && prev_backup_4g !== null && prev_backup_4g !== "") {
         final_prev_backup_4g = Number(prev_backup_4g);
-      } else if (cachedConfig.prev_backup_4g !== undefined) {
+      } else if (hasMeaningfulScalar(cachedConfig.prev_backup_4g)) {
         final_prev_backup_4g = cachedConfig.prev_backup_4g;
-      } else if (prevConfig && prevConfig.curr_backup_4g !== undefined) {
-        final_prev_backup_4g = prevConfig.curr_backup_4g;
+      } else if (prevConfig) {
+        const inheritedPrevBackup4g = getHistoricalNumericMetric(
+          prevConfig,
+          ["curr_backup_4g"],
+          "curr_backup_4g"
+        );
+        if (inheritedPrevBackup4g !== null) {
+          final_prev_backup_4g = inheritedPrevBackup4g;
+        } else if (prevMonthStr === "2026-06") {
+          final_prev_backup_4g = 83;
+        } else if (month === "2026-06") {
+          final_prev_backup_4g = 40;
+        } else {
+          final_prev_backup_4g = 0;
+        }
       } else {
         if (prevMonthStr === "2026-06") {
           final_prev_backup_4g = 83;
@@ -2711,7 +2769,7 @@ echo "=================================================="
         final_prev_dingtalk_sessions = inheritedPrevDingtalkSessions;
       } else if (prev_dingtalk_sessions !== undefined && prev_dingtalk_sessions !== null && prev_dingtalk_sessions !== "") {
         final_prev_dingtalk_sessions = Number(prev_dingtalk_sessions);
-      } else if (cachedConfig.prev_dingtalk_sessions !== undefined) {
+      } else if (hasMeaningfulScalar(cachedConfig.prev_dingtalk_sessions)) {
         final_prev_dingtalk_sessions = cachedConfig.prev_dingtalk_sessions;
       } else {
         if (prevMonthStr === "2026-06") {
@@ -2931,7 +2989,10 @@ echo "=================================================="
            FROM work_orders wo 
            LEFT JOIN stores s ON wo.store_id = s.id 
            LEFT JOIN cos_brand cb ON s.cos_brand_id = cb.id
-           WHERE wo.type = 3 AND wo.create_time BETWEEN ? AND ?`,
+           WHERE wo.type = 3
+             AND wo.deleted_at IS NULL
+             AND (s.store_name IS NULL OR s.store_name NOT LIKE '%测试%')
+             AND wo.create_time BETWEEN ? AND ?`,
           [start_date_str, end_date_str]
         );
         if (currRows) {
@@ -2971,8 +3032,12 @@ echo "=================================================="
         // 2) 抓取上月工单对比总量
         const [compRows]: any = await connection.execute(
           `SELECT COUNT(*) as cnt 
-           FROM work_orders wo 
-           WHERE wo.type = 3 AND wo.create_time BETWEEN ? AND ?`,
+           FROM work_orders wo
+           LEFT JOIN stores s ON wo.store_id = s.id
+           WHERE wo.type = 3
+             AND wo.deleted_at IS NULL
+             AND (s.store_name IS NULL OR s.store_name NOT LIKE '%测试%')
+             AND wo.create_time BETWEEN ? AND ?`,
           [comp_start_str, comp_end_str]
         );
         if (compRows && compRows.length > 0) {
@@ -2983,8 +3048,12 @@ echo "=================================================="
         const [cateRows]: any = await connection.execute(
           `SELECT COALESCE(woad.split_big_class_name, '未分类') as asset_cate_name 
            FROM work_orders wo 
-           INNER JOIN work_order_asset_details woad ON wo.id = woad.work_order_id 
-           WHERE wo.type = 3 AND wo.create_time BETWEEN ? AND ?`,
+           INNER JOIN work_order_asset_details woad ON wo.id = woad.work_order_id
+           LEFT JOIN stores s ON wo.store_id = s.id
+           WHERE wo.type = 3
+             AND wo.deleted_at IS NULL
+             AND (s.store_name IS NULL OR s.store_name NOT LIKE '%测试%')
+             AND wo.create_time BETWEEN ? AND ?`,
           [start_date_str, end_date_str]
         );
         if (cateRows) {
@@ -3011,8 +3080,12 @@ echo "=================================================="
                   wo.complete_time, 
                   IFNULL(wo.total_pause_time, 0) as total_pause_time 
            FROM work_orders wo 
-           LEFT JOIN cos ON wo.supplier_id = cos.id 
-           WHERE wo.type = 3 AND wo.create_time BETWEEN ? AND ? 
+           LEFT JOIN cos ON wo.supplier_id = cos.id
+           LEFT JOIN stores s ON wo.store_id = s.id
+           WHERE wo.type = 3
+             AND wo.deleted_at IS NULL
+             AND (s.store_name IS NULL OR s.store_name NOT LIKE '%测试%')
+             AND wo.create_time BETWEEN ? AND ?
              AND wo.allocation_time > 0 AND wo.complete_time > 0`,
           [start_date_str, end_date_str]
         );
@@ -3071,8 +3144,12 @@ echo "=================================================="
           `SELECT wo.allocation_time, 
                   wo.complete_time, 
                   IFNULL(wo.total_pause_time, 0) as total_pause_time 
-           FROM work_orders wo 
-           WHERE wo.type = 3 AND wo.create_time BETWEEN ? AND ? 
+           FROM work_orders wo
+           LEFT JOIN stores s ON wo.store_id = s.id
+           WHERE wo.type = 3
+             AND wo.deleted_at IS NULL
+             AND (s.store_name IS NULL OR s.store_name NOT LIKE '%测试%')
+             AND wo.create_time BETWEEN ? AND ?
              AND wo.allocation_time > 0 AND wo.complete_time > 0`,
           [comp_start_str, comp_end_str]
         );
@@ -3271,10 +3348,23 @@ echo "=================================================="
 
       if (prev_renwood_count !== undefined && prev_renwood_count !== null && prev_renwood_count !== "") {
         final_prev_renwood_count = Number(prev_renwood_count);
-      } else if (cachedConfig.prev_renwood_count !== undefined) {
+      } else if (hasMeaningfulScalar(cachedConfig.prev_renwood_count)) {
         final_prev_renwood_count = cachedConfig.prev_renwood_count;
-      } else if (prevConfig && prevConfig.curr_renwood_count !== undefined) {
-        final_prev_renwood_count = prevConfig.curr_renwood_count;
+      } else if (prevConfig) {
+        const inheritedPrevRenwood = getHistoricalNumericMetric(
+          prevConfig,
+          ["current_renwood_count", "curr_renwood_count"],
+          "curr_renwood_count"
+        );
+        if (inheritedPrevRenwood !== null) {
+          final_prev_renwood_count = inheritedPrevRenwood;
+        } else if (prevMonthStr === "2026-06" || month === "2026-07") {
+          final_prev_renwood_count = dingTalkMetrics.current_renwood_count || 20;
+        } else if (month === "2026-06") {
+          final_prev_renwood_count = dingTalkMetrics.compare_month_renovation_count || 0;
+        } else {
+          final_prev_renwood_count = 15;
+        }
       } else {
         if (prevMonthStr === "2026-06" || month === "2026-07") {
           final_prev_renwood_count = dingTalkMetrics.current_renwood_count || 20;
@@ -3287,10 +3377,23 @@ echo "=================================================="
 
       if (prev_new_shops !== undefined && prev_new_shops !== null && prev_new_shops !== "") {
         final_prev_new_shops = Number(prev_new_shops);
-      } else if (cachedConfig.prev_new_shops !== undefined) {
+      } else if (hasMeaningfulScalar(cachedConfig.prev_new_shops)) {
         final_prev_new_shops = cachedConfig.prev_new_shops;
-      } else if (prevConfig && prevConfig.curr_new_shops !== undefined) {
-        final_prev_new_shops = prevConfig.curr_new_shops;
+      } else if (prevConfig) {
+        const inheritedPrevNewShops = getHistoricalNumericMetric(
+          prevConfig,
+          ["current_new_shops", "curr_new_shops"],
+          "curr_new_shops"
+        );
+        if (inheritedPrevNewShops !== null) {
+          final_prev_new_shops = inheritedPrevNewShops;
+        } else if (prevMonthStr === "2026-06" || month === "2026-07") {
+          final_prev_new_shops = dingTalkMetrics.current_new_shops || dbNewShopsFromDb || 2;
+        } else if (month === "2026-06") {
+          final_prev_new_shops = dingTalkMetrics.compare_month_new_shops || dbCompNewShopsFromDb || 2;
+        } else {
+          final_prev_new_shops = 1;
+        }
       } else {
         if (prevMonthStr === "2026-06" || month === "2026-07") {
           final_prev_new_shops = dingTalkMetrics.current_new_shops || dbNewShopsFromDb || 2;

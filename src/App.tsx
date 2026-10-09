@@ -1545,7 +1545,7 @@ export default function App() {
       let mergedDrafts = localDrafts;
       let serverRevision = 0;
       let serverReadSucceeded = false;
-      let serverConfigExists = false;
+      let serverBaselineConfig: Record<string, any> = {};
       const emptyBoh = {
         "太二": { "堂食": 0, "外卖": 0, "营销活动": 0 },
         "九毛九": { "堂食": 0, "外卖": 0, "营销活动": 0 },
@@ -1557,12 +1557,11 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           serverReadSucceeded = true;
-          serverConfigExists = !!data?.exists;
           serverRevision = Number(data?.revision || 0);
           setMonthSnapshotMeta(data?.snapshot || null);
           const cfg = data?.config;
-          if (data?.exists && cfg && typeof cfg === "object") {
-            mergedDrafts = {
+          if (cfg && typeof cfg === "object") {
+            serverBaselineConfig = {
               curr_backup_4g: cfg.curr_backup_4g !== undefined ? cfg.curr_backup_4g : "",
               prev_backup_4g: cfg.prev_backup_4g !== undefined ? cfg.prev_backup_4g : "",
               curr_dingtalk_sessions: cfg.curr_dingtalk_sessions !== undefined ? cfg.curr_dingtalk_sessions : "",
@@ -1573,8 +1572,26 @@ export default function App() {
               prev_new_shops: cfg.prev_new_shops !== undefined ? cfg.prev_new_shops : "",
               dingtalk_qiyu_supplement: normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement || {}),
               qiyu_category_overrides: normalizeQiyuCategoryOverrides(cfg.qiyu_category_overrides || {}),
-              curr_boh: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : emptyBoh,
-              prev_boh: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : emptyBoh
+              curr_boh_data: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : emptyBoh,
+              prev_boh_data: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : emptyBoh
+            };
+            mergedDrafts = {
+              curr_backup_4g: cfg.curr_backup_4g !== undefined ? cfg.curr_backup_4g : localDrafts.curr_backup_4g,
+              prev_backup_4g: cfg.prev_backup_4g !== undefined ? cfg.prev_backup_4g : localDrafts.prev_backup_4g,
+              curr_dingtalk_sessions: cfg.curr_dingtalk_sessions !== undefined ? cfg.curr_dingtalk_sessions : localDrafts.curr_dingtalk_sessions,
+              prev_dingtalk_sessions: cfg.prev_dingtalk_sessions !== undefined ? cfg.prev_dingtalk_sessions : localDrafts.prev_dingtalk_sessions,
+              curr_renwood_count: cfg.curr_renwood_count !== undefined ? cfg.curr_renwood_count : localDrafts.curr_renwood_count,
+              curr_new_shops: cfg.curr_new_shops !== undefined ? cfg.curr_new_shops : localDrafts.curr_new_shops,
+              prev_renwood_count: cfg.prev_renwood_count !== undefined ? cfg.prev_renwood_count : localDrafts.prev_renwood_count,
+              prev_new_shops: cfg.prev_new_shops !== undefined ? cfg.prev_new_shops : localDrafts.prev_new_shops,
+              dingtalk_qiyu_supplement: cfg.dingtalk_qiyu_supplement !== undefined
+                ? normalizeQiyuCategoryMap(cfg.dingtalk_qiyu_supplement)
+                : localDrafts.dingtalk_qiyu_supplement,
+              qiyu_category_overrides: cfg.qiyu_category_overrides !== undefined
+                ? normalizeQiyuCategoryOverrides(cfg.qiyu_category_overrides)
+                : localDrafts.qiyu_category_overrides,
+              curr_boh: cfg.curr_boh_data !== undefined ? cfg.curr_boh_data : localDrafts.curr_boh,
+              prev_boh: cfg.prev_boh_data !== undefined ? cfg.prev_boh_data : localDrafts.prev_boh
             };
           }
         }
@@ -1601,7 +1618,7 @@ export default function App() {
 
       sharedBaselineRef.current = {
         month,
-        config: serverConfigExists ? sharedConfig : {},
+        config: serverReadSucceeded ? serverBaselineConfig : {},
         revision: serverRevision
       };
       sharedHydratedMonthRef.current = serverReadSucceeded ? month : null;
