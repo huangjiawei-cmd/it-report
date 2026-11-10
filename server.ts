@@ -549,7 +549,7 @@ async function startServer() {
     return result;
   };
 
-  const APP_RELEASE = "1.5.7-chart-order-logo-inheritance";
+  const APP_RELEASE = "1.5.8-p0-collaboration-race-guard";
   const REPORT_LOGO_IDS = new Set(["jiumaojiu", "taier", "song", "group"]);
   const MAX_REPORT_LOGO_DATA_URL_LENGTH = 3_600_000;
 

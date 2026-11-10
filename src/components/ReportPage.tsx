@@ -626,9 +626,17 @@ export const ReportPage: React.FC<ReportPageProps> = ({
   const dirtyCounterRef = useRef<Record<string, number>>({});
   const ackedCounterRef = useRef<Record<string, number>>({});
   const syncSessionMonthRef = useRef<string | null>(null);
+  const syncRequestSequenceRef = useRef(0);
+  const lastAppliedSyncResponseRef = useRef(0);
+  const syncInFlightRef = useRef(false);
   const markDirty = (field: string) => {
     dirtyCounterRef.current[field] = (dirtyCounterRef.current[field] || 0) + 1;
   };
+
+  // 只要本机字段还有未被服务器确认的修改，任何心跳回传都不得覆盖该字段。
+  // 这是协同编辑的本地写保护，避免“失焦保存”与更早发出的心跳响应发生竞态。
+  const hasPendingLocalChange = (field: string) =>
+    (dirtyCounterRef.current[field] || 0) > (ackedCounterRef.current[field] || 0);
 
   // 收集当前仍未确认送达的脏字段内容
   const collectDirtyComments = () => {
@@ -765,6 +773,10 @@ export const ReportPage: React.FC<ReportPageProps> = ({
     let isSubscribed = true;
 
     const performSync = async () => {
+      // 心跳严格串行：慢请求未完成时跳过本轮定时器，避免同一客户端的旧写请求晚到服务器覆盖新写请求。
+      if (syncInFlightRef.current) return;
+      syncInFlightRef.current = true;
+      const requestSequence = ++syncRequestSequenceRef.current;
       const current = stateRefs.current;
       const payload: any = {
         month: current.month,
@@ -796,6 +808,11 @@ export const ReportPage: React.FC<ReportPageProps> = ({
           const data = await res.json();
           if (!isSubscribed) return;
 
+          // 心跳请求允许并发；如果较新的响应已经先到，晚到的旧响应必须整体丢弃，
+          // 否则旧 serverComments 仍可能在本地修改已 ACK 后反向覆盖新文案。
+          if (requestSequence < lastAppliedSyncResponseRef.current) return;
+          lastAppliedSyncResponseRef.current = requestSequence;
+
           // [多端同步修复] 将已成功送达的脏字段标记为已确认；若发送期间用户又产生了新修改则保持脏状态，下轮心跳继续补发
           for (const key of Object.keys(sentSnapshot)) {
             if ((dirtyCounterRef.current[key] || 0) === sentSnapshot[key]) {
@@ -813,31 +830,31 @@ export const ReportPage: React.FC<ReportPageProps> = ({
             const sc = data.serverComments;
             const focused = stateRefs.current.editingField;
 
-            if (sc.slide2Bullets && Array.isArray(sc.slide2Bullets) && sc.slide2Bullets.some(b => isNonEmptyText(b)) && !focused?.startsWith("slide2Bullet")) {
+            if (sc.slide2Bullets && Array.isArray(sc.slide2Bullets) && sc.slide2Bullets.some(b => isNonEmptyText(b)) && !focused?.startsWith("slide2Bullet") && !hasPendingLocalChange("slide2Bullets")) {
               setSlide2Bullets(sc.slide2Bullets.filter(b => isNonEmptyText(b)));
             }
-            if (sc.slide4Comment !== undefined && isNonEmptyText(sc.slide4Comment) && focused !== "slide4Comment") {
+            if (sc.slide4Comment !== undefined && isNonEmptyText(sc.slide4Comment) && focused !== "slide4Comment" && !hasPendingLocalChange("slide4Comment")) {
               setSlide4Comment(cleanHtml(sc.slide4Comment));
             }
-            if (sc.slide5Comment !== undefined && isNonEmptyText(sc.slide5Comment) && focused !== "slide5Comment") {
+            if (sc.slide5Comment !== undefined && isNonEmptyText(sc.slide5Comment) && focused !== "slide5Comment" && !hasPendingLocalChange("slide5Comment")) {
               setSlide5Comment(cleanHtml(sc.slide5Comment));
             }
-            if (sc.slide6Comment !== undefined && isNonEmptyText(sc.slide6Comment) && focused !== "slide6Comment") {
+            if (sc.slide6Comment !== undefined && isNonEmptyText(sc.slide6Comment) && focused !== "slide6Comment" && !hasPendingLocalChange("slide6Comment")) {
               setSlide6Comment(cleanHtml(sc.slide6Comment));
             }
-            if (sc.slide7Comment !== undefined && isNonEmptyText(sc.slide7Comment) && focused !== "slide7Comment") {
+            if (sc.slide7Comment !== undefined && isNonEmptyText(sc.slide7Comment) && focused !== "slide7Comment" && !hasPendingLocalChange("slide7Comment")) {
               setSlide7Comment(cleanHtml(sc.slide7Comment));
             }
-            if (sc.slide8Comment !== undefined && isNonEmptyText(sc.slide8Comment) && focused !== "slide8Comment") {
+            if (sc.slide8Comment !== undefined && isNonEmptyText(sc.slide8Comment) && focused !== "slide8Comment" && !hasPendingLocalChange("slide8Comment")) {
               setSlide8Comment(cleanHtml(sc.slide8Comment));
             }
-            if (sc.customProjectSlides !== undefined && !focused?.startsWith("project_")) {
+            if (sc.customProjectSlides !== undefined && !focused?.startsWith("project_") && !hasPendingLocalChange("customProjectSlides")) {
               // 项目专页数据通过协同同步引擎跨设备同步（服务器端持久化）
               setCustomProjectSlides(sc.customProjectSlides);
             }
-            if (sc.slideOrder !== undefined) {
+            if (sc.slideOrder !== undefined && !hasPendingLocalChange("slideOrder")) {
               // [多端同步修复] 优先使用本轮刚从服务端拿到的专页清单做调和，避免 localEditsRef 尚未更新时把专项页从排序中误剔除
-              const latestSlides = (sc.customProjectSlides !== undefined && !focused?.startsWith("project_"))
+              const latestSlides = (sc.customProjectSlides !== undefined && !focused?.startsWith("project_") && !hasPendingLocalChange("customProjectSlides"))
                 ? sc.customProjectSlides
                 : localEditsRef.current.customProjectSlides;
               setSlideOrder(reconcileSlideOrder(sc.slideOrder, latestSlides));
@@ -846,6 +863,8 @@ export const ReportPage: React.FC<ReportPageProps> = ({
         }
       } catch (err) {
         console.warn("协作心跳同步失败:", err);
+      } finally {
+        syncInFlightRef.current = false;
       }
     };
 
