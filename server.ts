@@ -549,7 +549,7 @@ async function startServer() {
     return result;
   };
 
-  const APP_RELEASE = "1.5.6-stability-inheritance-ticket-filter";
+  const APP_RELEASE = "1.5.7-chart-order-logo-inheritance";
   const REPORT_LOGO_IDS = new Set(["jiumaojiu", "taier", "song", "group"]);
   const MAX_REPORT_LOGO_DATA_URL_LENGTH = 3_600_000;
 
@@ -869,11 +869,44 @@ async function startServer() {
     config._working_snapshot_stale_by = null;
   };
 
-  const syncWorkingSnapshotContent = (config: any) => {
+  const getInheritedReportLogos = (storage: any, month: string) => {
+    // 从当前账期之前的最近月份向前寻找各品牌最后一次明确保存的 Logo。
+    // 空字符串也是有效值，代表“恢复内置默认”，会继续向后续月份继承。
+    const inherited: Record<string, string> = {};
+    const months = Object.keys(storage?.month_configs || {})
+      .filter((key) => /^\d{4}-\d{2}$/.test(key) && key < month)
+      .sort()
+      .reverse();
+    for (const monthKey of months) {
+      const monthConfig = storage.month_configs?.[monthKey] || {};
+      const candidates = [
+        monthConfig.report_logos,
+        monthConfig.final_snapshot?.report_logos,
+        monthConfig.last_generated_snapshot?.report_logos
+      ];
+      for (const candidate of candidates) {
+        if (!candidate || typeof candidate !== "object") continue;
+        for (const brandId of REPORT_LOGO_IDS) {
+          if (inherited[brandId] === undefined && typeof candidate[brandId] === "string") {
+            inherited[brandId] = candidate[brandId];
+          }
+        }
+      }
+      if ([...REPORT_LOGO_IDS].every((brandId) => inherited[brandId] !== undefined)) break;
+    }
+    return inherited;
+  };
+
+  const getEffectiveReportLogos = (storage: any, month: string, config: any) => ({
+    ...getInheritedReportLogos(storage, month),
+    ...(config?.report_logos || {})
+  });
+
+  const syncWorkingSnapshotContent = (config: any, reportLogosOverride?: Record<string, string>) => {
     const working = config?.last_generated_snapshot;
     if (!working?.metrics) return;
     const comments = getResolvedSharedComments(config, working.metrics);
-    const reportLogos = cloneJson(config.report_logos || {});
+    const reportLogos = cloneJson(reportLogosOverride || config.report_logos || {});
     working.comments = comments;
     working.report_logos = reportLogos;
     working.metrics.custom_comments = comments;
@@ -1587,7 +1620,7 @@ async function startServer() {
       const metrics = cloneJson(incomingMetrics);
       delete metrics.snapshot_meta;
       metrics.custom_comments = comments;
-      const reportLogos = cloneJson(config.report_logos || {});
+      const reportLogos = cloneJson(getEffectiveReportLogos(storage, month, config));
 
       const nextVersion = Number(config.final_snapshot?.version || 0) + 1;
       const snapshotId = buildSnapshotId(month, metrics, comments, reportLogos, nextVersion);
@@ -1699,7 +1732,8 @@ async function startServer() {
     }
   });
 
-  // 月报第 2 页四个品牌 Logo：按账期保存，仅本月撰写人或管理员可修改；最终版锁定后随快照冻结。
+  // 月报第 2 页四个品牌 Logo：编辑中账期继承最近历史账期，上传一次后后续账期自动沿用；
+  // 最终版锁定时仍随快照冻结，保证历史月报不会被后续 Logo 修改反向影响。
   app.get("/api/report-logos/:month", authenticateMiddleware, (req: any, res) => {
     try {
       const { month } = req.params;
@@ -1709,9 +1743,14 @@ async function startServer() {
       const storage = loadStorage();
       const config = storage.month_configs?.[month] || {};
       const snapshotMeta = getSnapshotMeta(config);
+      const frozenLogos = config.final_snapshot?.report_logos;
       const reportLogos = snapshotMeta.locked
-        ? (config.final_snapshot?.report_logos || config.report_logos || {})
-        : (config.report_logos || {});
+        ? (
+            frozenLogos && typeof frozenLogos === "object" && Object.keys(frozenLogos).length > 0
+              ? frozenLogos
+              : (config.report_logos || {})
+          )
+        : getEffectiveReportLogos(storage, month, config);
       return res.json({
         reportLogos,
         snapshot: snapshotMeta,
@@ -1750,19 +1789,24 @@ async function startServer() {
       }
 
       const nextLogos = { ...(config.report_logos || {}) };
-      if (base64) nextLogos[brandId] = base64;
-      else delete nextLogos[brandId];
+      if (base64) {
+        nextLogos[brandId] = base64;
+      } else {
+        // 空字符串是显式“恢复内置默认”的标记，可阻止旧账期自定义 Logo 再次被继承。
+        nextLogos[brandId] = "";
+      }
       config.report_logos = nextLogos;
       config._updated_at = new Date().toISOString();
       config._updated_by = req.user?.username || "unknown";
       markSnapshotStale(config, "月报品牌 Logo 已发生修改", req.user?.username);
-      syncWorkingSnapshotContent(config);
+      const effectiveReportLogos = getEffectiveReportLogos(storage, month, config);
+      syncWorkingSnapshotContent(config, effectiveReportLogos);
       storage.month_configs[month] = config;
       saveStorage(storage);
 
       return res.json({
         success: true,
-        reportLogos: nextLogos,
+        reportLogos: effectiveReportLogos,
         snapshot: getSnapshotMeta(config)
       });
     } catch (e: any) {
@@ -2176,7 +2220,10 @@ echo "=================================================="
           storage.month_configs[month].custom_comments = sComments;
           markSnapshotStale(storage.month_configs[month], missingOnlyMigration ? "已恢复本机历史月报文案" : "月报文字、专项页或页面布局已发生修改", username);
           // 文本/专项页不改变统计指标，可直接同步进共享工作版，避免另一台电脑仍看到旧文字。
-          syncWorkingSnapshotContent(storage.month_configs[month]);
+          syncWorkingSnapshotContent(
+            storage.month_configs[month],
+            getEffectiveReportLogos(storage, month, storage.month_configs[month])
+          );
           saveStorage(storage);
         }
       }
@@ -3511,7 +3558,7 @@ echo "=================================================="
           release: APP_RELEASE,
           metrics: generatedMetrics,
           comments: getResolvedSharedComments(config, generatedMetrics),
-          report_logos: cloneJson(config.report_logos || {})
+          report_logos: cloneJson(getEffectiveReportLogos(latestStorage, month, config))
         };
         config.last_generated_snapshot = generatedRecord;
         clearWorkingSnapshotStale(config);

@@ -273,7 +273,7 @@ export const QiyuCompareChart: React.FC<QiyuCompareProps> = ({
         <XAxis type="number" stroke="#4b5563" fontSize={11} tickLine={false} axisLine={false} />
         <YAxis type="category" dataKey="name" stroke="#4b5563" fontSize={11} tickLine={false} />
         <Tooltip content={<CustomTooltip />} />
-        <Legend verticalAlign="bottom" height={36} iconSize={12} iconType="rect" />
+        <Legend verticalAlign="bottom" height={36} iconSize={12} iconType="rect" itemSorter={null} />
         <Bar
           dataKey={prevLabel}
           fill={COLOR_COMP_BLUE}
@@ -345,7 +345,7 @@ export const BrandBohChart: React.FC<BrandBohProps> = ({
         <XAxis dataKey="name" stroke="#4b5563" fontSize={11} tickLine={false} />
         <YAxis stroke="#4b5563" fontSize={11} tickLine={false} axisLine={false} />
         <Tooltip content={<CustomTooltip />} />
-        <Legend verticalAlign="bottom" height={28} iconSize={10} iconType="rect" wrapperStyle={{ fontSize: '11px', fontWeight: 'bold' }} />
+        <Legend verticalAlign="bottom" height={28} iconSize={10} iconType="rect" itemSorter={null} wrapperStyle={{ fontSize: '11px', fontWeight: 'bold' }} />
         <Bar
           dataKey={prevLabel}
           fill={COLOR_COMP_BLUE}
